@@ -1,0 +1,46 @@
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 日志文件
+*.log
+logs/
+
+# 结果文件
+results/
+
+# 数据文件缓存
+data/cache/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境文件
+.env
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Cache files
+cache/
+.cache/
+
+# Data files
+*.csv
+*.xlsx
+*.json
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo 
