@@ -3,8 +3,10 @@
 
 import logging
 from datetime import datetime, timedelta
-from src.data import StockDataFetcher
+from src.data.fetcher import StockDataFetcher
 from src.utils.logger import get_logger
+import pytest
+import pandas as pd
 
 # 设置日志
 logger = get_logger(__name__)

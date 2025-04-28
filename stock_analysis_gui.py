@@ -20,6 +20,25 @@ from PIL import Image, ImageTk
 from gui_controller import GuiController
 # 导入增强版GUI控制器
 from enhanced_gui_controller import EnhancedGuiController
+# 导入ML动量分析模型
+from ml_momentum_model import MLMomentumModel
+
+# 导入API增强可靠性模块
+try:
+    from enhance_api_reliability import (
+        enhance_get_stock_name, 
+        enhance_get_stock_names_batch, 
+        enhance_get_stock_industry,
+        with_retry
+    )
+    HAS_ENHANCED_API = True
+    logging.info("成功加载增强API可靠性模块")
+except ImportError:
+    HAS_ENHANCED_API = False
+    logging.warning("无法加载增强API可靠性模块，将使用基本API功能")
+    # 导入原始函数作为备用
+    from stock_data_storage import get_stock_name
+    
 # 确保当前目录在Python路径中
 current_dir = Path(__file__).parent
 if str(current_dir) not in sys.path:
@@ -41,6 +60,37 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 将UI获取股票名称和行业的函数替换为增强版本
+def get_stock_name_ui(ts_code):
+    """
+    UI中使用的获取股票名称函数
+    优先使用增强API，失败时回退到原始方法
+    """
+    try:
+        if HAS_ENHANCED_API:
+            return enhance_get_stock_name(ts_code)
+        else:
+            return get_stock_name(ts_code)
+    except Exception as e:
+        logging.error(f"获取股票名称失败: {e}")
+        return f"未知-{ts_code}"
+
+def get_stock_industry_ui(ts_code):
+    """
+    UI中使用的获取股票行业函数
+    优先使用增强API，失败时返回未知行业
+    """
+    try:
+        if HAS_ENHANCED_API:
+            return enhance_get_stock_industry(ts_code)
+        else:
+            # 尝试从控制器获取
+            return self.controller.get_stock_industry(ts_code)
+    except Exception as e:
+        logging.error(f"获取股票行业失败: {e}")
+        return "未知行业"
+
 class StockAnalysisGUI:
     """股票分析系统GUI界面类"""
     def __init__(self, root):
@@ -50,9 +100,18 @@ class StockAnalysisGUI:
         self.root.geometry("1200x800")
         # 初始化控制器 - 使用增强版控制器
         self.controller = EnhancedGuiController()
+        # 初始化ML动量模型
+        self.ml_model = MLMomentumModel(use_enhanced=True)
         # 初始化数据
         self.status_message = tk.StringVar()
         self.status_message.set("就绪")
+        
+        # 添加API状态显示变量
+        self.api_status = tk.StringVar()
+        self.api_status.set("API状态: 正常")
+        
+        # 记录是否使用增强API模块
+        self.using_enhanced_api = HAS_ENHANCED_API
         
         # 热门板块分类
         self.hot_sectors = [
@@ -138,6 +197,10 @@ class StockAnalysisGUI:
         self.combined_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.combined_tab, text="组合策略")
         self.setup_combined_tab()
+        # 创建ML动量分析选项卡
+        self.ml_momentum_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.ml_momentum_tab, text="ML动量分析")
+        self.setup_ml_momentum_tab()
         # 创建财务分析选项卡
         self.financial_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.financial_tab, text="财务分析")
@@ -176,7 +239,7 @@ class StockAnalysisGUI:
         industry_combo.grid(row=1, column=1, padx=5, pady=5)
         # 最低得分
         ttk.Label(param_frame, text="最低得分:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-        self.min_score_var = tk.StringVar(value="60")
+        self.min_score_var = tk.StringVar(value="30")  # 从60改为30
         ttk.Entry(param_frame, textvariable=self.min_score_var, width=10).grid(row=2, column=1, padx=5, pady=5)
         # 分析按钮
         ttk.Button(param_frame, text="运行增强分析", command=self.run_momentum_analysis).grid(
@@ -298,7 +361,7 @@ class StockAnalysisGUI:
         momentum_frame = ttk.LabelFrame(param_frame, text="动量分析参数")
         momentum_frame.pack(fill=tk.X, padx=5, pady=5)
         ttk.Label(momentum_frame, text="最低得分:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.combined_min_score_var = tk.StringVar(value="60")
+        self.combined_min_score_var = tk.StringVar(value="30")  # 从60改为30
         ttk.Entry(momentum_frame, textvariable=self.combined_min_score_var, width=10).grid(row=0, column=1, padx=5, pady=5)
         # 均线交叉参数区域
         ma_frame = ttk.LabelFrame(param_frame, text="均线交叉参数")
@@ -659,15 +722,162 @@ class StockAnalysisGUI:
         # 日志添加按钮
         ttk.Button(frame, text="清空日志", command=self.clear_log).pack(pady=5)
         
+        # 添加API测试按钮
+        if self.using_enhanced_api:
+            api_test_frame = ttk.Frame(self.log_tab)
+            api_test_frame.pack(fill=tk.X, padx=5, pady=5)
+            
+            ttk.Label(api_test_frame, text="API增强功能测试:").pack(side=tk.LEFT, padx=5)
+            
+            test_btn = ttk.Button(api_test_frame, text="测试批量名称获取", 
+                                command=self.test_enhanced_batch_names)
+            test_btn.pack(side=tk.LEFT, padx=5)
+            
+            test_industry_btn = ttk.Button(api_test_frame, text="测试行业数据", 
+                                     command=self.test_enhanced_industry)
+            test_industry_btn.pack(side=tk.LEFT, padx=5)
+            
+            clear_cache_btn = ttk.Button(api_test_frame, text="清除缓存", 
+                                   command=self.clear_api_cache)
+            clear_cache_btn.pack(side=tk.LEFT, padx=5)
+    
+    def test_enhanced_batch_names(self):
+        """测试增强版批量获取股票名称"""
+        if not self.using_enhanced_api:
+            messagebox.showinfo("提示", "未加载增强API模块，无法执行测试")
+            return
+            
+        try:
+            # 定义一组测试股票代码
+            test_codes = ['601318.SH', '000651.SZ', '000333.SZ', '600519.SH', 
+                         '000002.SZ', '600036.SH', '000999.SZ', '600276.SH']
+            
+            # 开始计时
+            start_time = time.time()
+            
+            # 调用批量获取函数
+            result = enhance_get_stock_names_batch(test_codes)
+            
+            # 计算耗时
+            elapsed = time.time() - start_time
+            
+            # 显示结果
+            result_text = f"批量获取股票名称测试结果 (耗时: {elapsed:.3f}秒):\n\n"
+            for code, name in result.items():
+                result_text += f"{code} -> {name}\n"
+                
+            messagebox.showinfo("测试结果", result_text)
+            
+            # 同时记录到日志
+            logging.info(f"批量获取股票名称测试:\n{result_text}")
+            
+        except Exception as e:
+            error_msg = f"测试过程中发生错误: {str(e)}"
+            logging.error(error_msg)
+            messagebox.showerror("错误", error_msg)
+    
+    def test_enhanced_industry(self):
+        """测试增强版获取股票行业"""
+        if not self.using_enhanced_api:
+            messagebox.showinfo("提示", "未加载增强API模块，无法执行测试")
+            return
+            
+        try:
+            # 定义一组测试股票代码
+            test_codes = ['601318.SH', '000651.SZ', '000333.SZ', '600519.SH']
+            
+            # 开始计时
+            start_time = time.time()
+            
+            # 获取行业数据
+            results = []
+            for code in test_codes:
+                industry = enhance_get_stock_industry(code)
+                results.append((code, industry))
+            
+            # 计算耗时
+            elapsed = time.time() - start_time
+            
+            # 显示结果
+            result_text = f"获取股票行业测试结果 (耗时: {elapsed:.3f}秒):\n\n"
+            for code, industry in results:
+                result_text += f"{code} -> {industry}\n"
+                
+            messagebox.showinfo("测试结果", result_text)
+            
+            # 同时记录到日志
+            logging.info(f"获取股票行业测试:\n{result_text}")
+            
+        except Exception as e:
+            error_msg = f"测试过程中发生错误: {str(e)}"
+            logging.error(error_msg)
+            messagebox.showerror("错误", error_msg)
+    
+    def clear_api_cache(self):
+        """清除API缓存"""
+        if not self.using_enhanced_api:
+            messagebox.showinfo("提示", "未加载增强API模块，无法清除缓存")
+            return
+            
+        try:
+            from enhance_api_reliability import update_cache_now
+            result = update_cache_now()
+            
+            messagebox.showinfo("缓存清除", f"API缓存已清除\n时间: {result['timestamp']}")
+            logging.info(f"API缓存已手动清除: {result}")
+            
+            # 刷新API状态
+            self.refresh_api_status()
+            
+        except Exception as e:
+            error_msg = f"清除缓存时发生错误: {str(e)}"
+            logging.error(error_msg)
+            messagebox.showerror("错误", error_msg)
+    
     def create_status_bar(self):
         """创建状态栏"""
         status_frame = ttk.Frame(self.root)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        # 状态标签
-        ttk.Label(status_frame, textvariable=self.status_message, relief=tk.SUNKEN, anchor=tk.W).pack(
-            side=tk.LEFT, fill=tk.X, expand=True)
-        # 版本信息
-        ttk.Label(status_frame, text="v1.0.0", relief=tk.SUNKEN).pack(side=tk.RIGHT)
+        
+        # 状态信息
+        status_label = ttk.Label(status_frame, textvariable=self.status_message)
+        status_label.pack(side=tk.LEFT, padx=5)
+        
+        # API状态
+        api_status_label = ttk.Label(status_frame, textvariable=self.api_status)
+        api_status_label.pack(side=tk.RIGHT, padx=5)
+        
+        # 如果使用增强API，添加API统计刷新按钮
+        if self.using_enhanced_api:
+            refresh_btn = ttk.Button(status_frame, text="刷新API状态", command=self.refresh_api_status)
+            refresh_btn.pack(side=tk.RIGHT, padx=5)
+            
+            # 启动定时刷新任务
+            self.root.after(10000, self.refresh_api_status)  # 每10秒刷新一次
+    
+    def refresh_api_status(self):
+        """刷新API状态显示"""
+        if self.using_enhanced_api:
+            try:
+                from enhance_api_reliability import get_cache_manager
+                stats = get_cache_manager()
+                api_calls = stats["api_stats"]
+                success_rate = 0
+                if api_calls["total"] > 0:
+                    success_rate = api_calls["success"] / api_calls["total"] * 100
+                
+                self.api_status.set(
+                    f"API状态: 成功率 {success_rate:.1f}% | "
+                    f"调用: {api_calls['total']} | "
+                    f"缓存: {stats['stock_names_cache_size']}"
+                )
+            except Exception as e:
+                self.api_status.set(f"API状态: 错误 - {str(e)[:30]}")
+        else:
+            self.api_status.set("API状态: 使用标准API")
+        
+        # 重新安排定时刷新
+        self.root.after(10000, self.refresh_api_status)
     
     # 功能方法
     def import_data(self):
@@ -723,7 +933,8 @@ class StockAnalysisGUI:
             results = self.controller.get_enhanced_momentum_analysis(
                 industry=None if industry == "全部" else industry,
                 sample_size=sample_size,
-                min_score=min_score
+                min_score=min_score,
+                gui_callback=self.gui_callback
             )
             
             # 更新UI显示结果
@@ -1797,6 +2008,452 @@ class StockAnalysisGUI:
         
         except Exception as e:
             logger.error(f"更新市场概览UI失败: {str(e)}", exc_info=True)
+    
+    def setup_ml_momentum_tab(self):
+        """设置ML动量分析选项卡"""
+        # 创建左右分割窗口
+        paned = ttk.PanedWindow(self.ml_momentum_tab, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 左侧参数设置区域
+        left_frame = ttk.Frame(paned)
+        paned.add(left_frame, weight=1)
+        
+        # 训练模型框架
+        train_frame = ttk.LabelFrame(left_frame, text="模型训练参数")
+        train_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 训练参数
+        ttk.Label(train_frame, text="训练样本大小:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.train_sample_var = tk.StringVar(value="50")
+        ttk.Entry(train_frame, textvariable=self.train_sample_var, width=10).grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(train_frame, text="回溯天数:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.lookback_days_var = tk.StringVar(value="180")
+        ttk.Entry(train_frame, textvariable=self.lookback_days_var, width=10).grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(train_frame, text="预测天数:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.forward_days_var = tk.StringVar(value="20")
+        ttk.Entry(train_frame, textvariable=self.forward_days_var, width=10).grid(row=2, column=1, padx=5, pady=5)
+        
+        # 特定市场状态训练选项
+        self.train_market_state_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(train_frame, text="为当前市场状态单独训练", variable=self.train_market_state_var).grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        
+        # 训练按钮
+        ttk.Button(train_frame, text="训练模型", command=self.train_ml_model).grid(
+            row=4, column=0, columnspan=2, pady=10)
+        
+        # 分析参数框架
+        analysis_frame = ttk.LabelFrame(left_frame, text="分析参数")
+        analysis_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 市场状态选择
+        ttk.Label(analysis_frame, text="市场状态:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.market_state_var = tk.StringVar(value="neutral")
+        market_states = ["bull", "bear", "volatile", "neutral"]
+        ttk.Combobox(analysis_frame, textvariable=self.market_state_var, values=market_states, width=12).grid(
+            row=0, column=1, padx=5, pady=5)
+        
+        # 样本大小设置
+        ttk.Label(analysis_frame, text="样本数量:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.ml_sample_size_var = tk.StringVar(value="100")
+        ttk.Entry(analysis_frame, textvariable=self.ml_sample_size_var, width=10).grid(row=1, column=1, padx=5, pady=5)
+        
+        # 行业选择
+        ttk.Label(analysis_frame, text="行业选择:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.ml_industry_var = tk.StringVar(value="全部")
+        industry_combo = ttk.Combobox(analysis_frame, textvariable=self.ml_industry_var, values=self.industries)
+        industry_combo.grid(row=2, column=1, padx=5, pady=5)
+        
+        # 最低得分
+        ttk.Label(analysis_frame, text="最低得分:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
+        self.ml_min_score_var = tk.StringVar(value="60")
+        ttk.Entry(analysis_frame, textvariable=self.ml_min_score_var, width=10).grid(row=3, column=1, padx=5, pady=5)
+        
+        # 分析按钮
+        ttk.Button(analysis_frame, text="运行ML分析", command=self.run_ml_analysis).grid(
+            row=4, column=0, columnspan=2, pady=10)
+        
+        # 可视化按钮
+        ttk.Button(left_frame, text="可视化指标权重", command=self.visualize_ml_weights).pack(fill=tk.X, padx=5, pady=10)
+        
+        # 导出按钮
+        ttk.Button(left_frame, text="导出ML分析结果", command=self.export_ml_results).pack(fill=tk.X, padx=5, pady=5)
+        
+        # 右侧结果区域
+        right_frame = ttk.Frame(paned)
+        paned.add(right_frame, weight=3)
+        
+        # 上半部分：结果表格
+        result_frame = ttk.LabelFrame(right_frame, text="ML动量分析结果")
+        result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 创建表格
+        columns = ("股票代码", "股票名称", "行业", "收盘价", "ML得分", "基础得分", "RSI", "MACD")
+        self.ml_tree = ttk.Treeview(result_frame, columns=columns, show="headings", height=15)
+        
+        # 设置列标题
+        for col in columns:
+            self.ml_tree.heading(col, text=col)
+        
+        # 设置列宽
+        self.ml_tree.column("股票代码", width=100)
+        self.ml_tree.column("股票名称", width=100)
+        self.ml_tree.column("行业", width=100)
+        self.ml_tree.column("收盘价", width=80)
+        self.ml_tree.column("ML得分", width=80)
+        self.ml_tree.column("基础得分", width=80)
+        self.ml_tree.column("RSI", width=80)
+        self.ml_tree.column("MACD", width=80)
+        
+        # 添加滚动条
+        scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.ml_tree.yview)
+        self.ml_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.ml_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 绑定双击事件
+        self.ml_tree.bind("<Double-1>", self.on_ml_tree_double_click)
+        
+        # 下半部分：图表区域
+        chart_frame = ttk.LabelFrame(right_frame, text="图表显示")
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 创建图表画布
+        self.ml_fig = plt.figure(figsize=(10, 6))
+        self.ml_canvas = FigureCanvasTkAgg(self.ml_fig, master=chart_frame)
+        self.ml_canvas.draw()
+        self.ml_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def train_ml_model(self):
+        """训练ML动量模型"""
+        try:
+            # 获取参数
+            sample_size = int(self.train_sample_var.get())
+            lookback_days = int(self.lookback_days_var.get())
+            forward_days = int(self.forward_days_var.get())
+            train_for_market = self.train_market_state_var.get()
+            market_state = self.market_state_var.get() if train_for_market else None
+            
+            # 更新状态
+            self.status_message.set("正在收集训练数据...")
+            self.root.update_idletasks()
+            
+            # 定义训练线程
+            def train_thread():
+                try:
+                    # 获取股票列表
+                    stock_list = self.controller.get_stock_list()
+                    if stock_list.empty:
+                        self.gui_callback("message", "股票列表为空，无法训练模型")
+                        return
+                    
+                    # 收集训练数据
+                    self.gui_callback("progress", ("正在收集训练数据...", 10))
+                    X, y = self.ml_model.collect_training_data(
+                        stock_list,
+                        lookback_days=lookback_days,
+                        forward_days=forward_days,
+                        sample_size=sample_size
+                    )
+                    
+                    if len(X) > 0:
+                        # 训练模型
+                        self.gui_callback("progress", (f"正在训练模型 (数据样本: {len(X)})...", 50))
+                        model = self.ml_model.train_model(X, y, market_state=market_state)
+                        
+                        if model:
+                            # 可视化特征重要性
+                            title = f"Feature Importance - {market_state}" if market_state else "Feature Importance"
+                            self.ml_model.visualize_feature_importance(model, title=title)
+                            
+                            # 更新UI
+                            message = f"模型训练完成 ({len(X)} 个样本)"
+                            if market_state:
+                                message += f" - 市场状态: {market_state}"
+                            self.gui_callback("complete", message)
+                        else:
+                            self.gui_callback("error", "模型训练失败")
+                    else:
+                        self.gui_callback("warning", "无法收集足够的训练数据")
+                        
+                except Exception as e:
+                    logger.error(f"训练ML模型时出错: {str(e)}")
+                    self.gui_callback("error", f"训练过程出错: {str(e)}")
+            
+            # 启动训练线程
+            thread = threading.Thread(target=train_thread)
+            thread.daemon = True
+            thread.start()
+            
+        except ValueError:
+            messagebox.showerror("错误", "参数格式错误，请输入有效的数字")
+
+    def run_ml_analysis(self):
+        """运行ML动量分析"""
+        try:
+            # 获取参数
+            sample_size = int(self.ml_sample_size_var.get())
+            min_score = int(self.ml_min_score_var.get())
+            market_state = self.market_state_var.get()
+            industry = self.ml_industry_var.get()
+            
+            # 更新状态
+            self.status_message.set("正在进行ML动量分析...")
+            self.root.update_idletasks()
+            
+            # 清空表格和图表
+            for item in self.ml_tree.get_children():
+                self.ml_tree.delete(item)
+            self.ml_fig.clear()
+            self.ml_canvas.draw()
+            
+            # 定义分析线程
+            def analysis_thread():
+                try:
+                    # 获取股票列表
+                    stock_list = self.controller.get_stock_list()
+                    
+                    # 过滤行业
+                    if industry != "全部":
+                        stock_list = stock_list[stock_list['industry'] == industry]
+                    
+                    if stock_list.empty:
+                        self.gui_callback("message", "没有符合条件的股票，请调整筛选条件")
+                        return
+                    
+                    self.gui_callback("progress", (f"开始分析 {len(stock_list)} 支股票", 10))
+                    
+                    # 定义回调函数
+                    def update_progress(msg, prog):
+                        self.gui_callback("progress", (msg, prog))
+                    
+                    # 运行分析
+                    results = self.ml_model.analyze_stocks_ml(
+                        stock_list,
+                        market_state=market_state,
+                        sample_size=sample_size,
+                        min_score=min_score,
+                        gui_callback=update_progress
+                    )
+                    
+                    # 更新UI
+                    if results:
+                        self.gui_callback("complete", f"分析完成，找到 {len(results)} 支强势股票")
+                        self.root.after(0, lambda: self._update_ml_results_ui(results))
+                    else:
+                        self.gui_callback("message", "没有符合条件的股票，请调整参数")
+                    
+                except Exception as e:
+                    logger.error(f"ML动量分析时出错: {str(e)}")
+                    self.gui_callback("error", f"分析过程出错: {str(e)}")
+            
+            # 启动分析线程
+            thread = threading.Thread(target=analysis_thread)
+            thread.daemon = True
+            thread.start()
+            
+        except ValueError:
+            messagebox.showerror("错误", "参数格式错误，请输入有效的数字")
+
+    def _update_ml_results_ui(self, results):
+        """更新ML分析结果UI"""
+        # 清空表格
+        for item in self.ml_tree.get_children():
+            self.ml_tree.delete(item)
+        
+        # 添加结果
+        for idx, result in enumerate(results):
+            self.ml_tree.insert(
+                "", tk.END, 
+                values=(
+                    result['ts_code'],
+                    result['name'],
+                    result.get('industry', ''),
+                    f"{result['close']:.2f}",
+                    f"{result['score']:.1f}",
+                    f"{result.get('base_score', 0):.1f}",
+                    f"{result['rsi']:.1f}",
+                    f"{result['macd']:.2f}"
+                )
+            )
+        
+        # 保存结果供导出
+        self.ml_results = results
+        
+        # 更新状态栏
+        self.status_message.set(f"ML分析完成，发现 {len(results)} 支符合条件的股票")
+
+    def on_ml_tree_double_click(self, event):
+        """处理ML结果表格双击事件"""
+        # 获取选中项
+        selection = self.ml_tree.selection()
+        if not selection:
+            return
+        
+        item = self.ml_tree.item(selection[0])
+        ts_code = item['values'][0]
+        
+        # 查找对应的结果数据
+        selected_stock = None
+        for result in self.ml_results:
+            if result['ts_code'] == ts_code:
+                selected_stock = result
+                break
+        
+        if selected_stock:
+            self._plot_ml_stock_chart(selected_stock)
+
+    def _plot_ml_stock_chart(self, stock_result):
+        """绘制ML股票图表"""
+        try:
+            # 获取数据
+            data = stock_result['data']
+            score_details = stock_result['score_details']
+            
+            # 清空图表
+            self.ml_fig.clear()
+            
+            # 创建子图
+            gs = self.ml_fig.add_gridspec(3, 1, height_ratios=[3, 1, 1])
+            ax1 = self.ml_fig.add_subplot(gs[0, 0])  # K线图
+            ax2 = self.ml_fig.add_subplot(gs[1, 0])  # MACD
+            ax3 = self.ml_fig.add_subplot(gs[2, 0])  # RSI
+            
+            # 设置标题
+            title = f"{stock_result['name']}({stock_result['ts_code']}) - ML得分: {stock_result['score']:.1f}"
+            ax1.set_title(title, fontsize=12)
+            
+            # 获取最近的交易日期
+            dates = data.index[-60:]
+            
+            # 绘制K线图
+            ax1.plot(dates, data['close'][-60:], label='收盘价', color='blue')
+            ax1.plot(dates, data['ma20'][-60:], label='MA20', color='red', linestyle='--')
+            ax1.plot(dates, data['ma60'][-60:], label='MA60', color='green', linestyle='-.')
+            
+            # 添加成交量
+            volume_data = data['volume'][-60:]
+            volume_norm = volume_data / volume_data.max() * data['close'][-60:].min() * 0.3
+            ax1.bar(dates, volume_norm, color='gray', alpha=0.3, label='成交量')
+            
+            # 设置x轴格式
+            ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%m-%d'))
+            ax1.xaxis.set_major_locator(plt.matplotlib.dates.WeekdayLocator(interval=2))
+            
+            # 添加图例
+            ax1.legend(loc='upper left')
+            
+            # 绘制MACD
+            ax2.plot(dates, data['macd'][-60:], label='MACD', color='blue')
+            ax2.plot(dates, data['macd_signal'][-60:], label='Signal', color='red')
+            ax2.bar(dates, data['macd_hist'][-60:], label='Hist', color='green', alpha=0.5)
+            ax2.axhline(y=0, color='gray', linestyle='-', alpha=0.3)
+            ax2.legend(loc='upper left')
+            ax2.set_title('MACD', fontsize=10)
+            
+            # 绘制RSI
+            ax3.plot(dates, data['rsi'][-60:], label='RSI', color='purple')
+            ax3.axhline(y=70, color='red', linestyle='--', alpha=0.3)
+            ax3.axhline(y=30, color='green', linestyle='--', alpha=0.3)
+            ax3.set_ylim(0, 100)
+            ax3.legend(loc='upper left')
+            ax3.set_title('RSI', fontsize=10)
+            
+            # 显示得分明细
+            score_text = "\n".join([
+                f"{k}: {v:.1f}" for k, v in score_details.items() 
+                if k not in ['ml_total', 'enhanced_total']
+            ])
+            
+            if 'enhanced_total' in score_details:
+                total_label = 'enhanced_total'
+            elif 'ml_total' in score_details:
+                total_label = 'ml_total'
+            else:
+                total_label = None
+                
+            if total_label:
+                score_text += f"\n\n总分: {score_details[total_label]:.1f}"
+            
+            props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+            ax1.text(0.02, 0.05, score_text, transform=ax1.transAxes, fontsize=8,
+                    verticalalignment='bottom', bbox=props)
+            
+            # 调整布局
+            self.ml_fig.tight_layout()
+            
+            # 更新画布
+            self.ml_canvas.draw()
+            
+        except Exception as e:
+            logger.error(f"绘制ML图表失败: {str(e)}")
+            self.status_message.set(f"错误：绘制图表失败 - {str(e)}")
+
+    def visualize_ml_weights(self):
+        """可视化ML指标权重"""
+        # 获取当前市场状态
+        market_state = self.market_state_var.get()
+        
+        # 获取权重
+        weights = self.ml_model.get_optimal_weights(market_state)
+        
+        if weights is None:
+            messagebox.showwarning("警告", f"没有找到{market_state}市场的模型，请先训练模型")
+            return
+        
+        # 创建新窗口
+        weights_window = tk.Toplevel(self.root)
+        # 记录全局异常
+        logger.error(f"程序发生严重错误: {str(e)}", exc_info=True)
+        # 尝试显示错误对话框
+        try:
+            import tkinter.messagebox as mb
+            mb.showerror("严重错误", f"程序发生错误，请联系开发人员:\n{str(e)}")
+        except:
+            print(f"严重错误: {str(e)}")
+
+    def export_ml_results(self):
+        """导出ML分析结果"""
+        if not hasattr(self, 'ml_results') or not self.ml_results:
+            messagebox.showwarning("警告", "没有可导出的结果")
+            return
+        
+        try:
+            # 创建导出数据框
+            export_data = []
+            for result in self.ml_results:
+                # 过滤掉数据列
+                filtered_result = {k: v for k, v in result.items() if k != 'data' and k != 'score_details'}
+                export_data.append(filtered_result)
+            
+            export_df = pd.DataFrame(export_data)
+            
+            # 选择保存路径
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV文件", "*.csv"), ("Excel文件", "*.xlsx")],
+                title="保存ML分析结果"
+            )
+            
+            if not file_path:
+                return
+            
+            # 保存文件
+            if file_path.endswith('.csv'):
+                export_df.to_csv(file_path, index=False, encoding='utf-8-sig')
+            elif file_path.endswith('.xlsx'):
+                export_df.to_excel(file_path, index=False)
+            
+            self.status_message.set(f"结果已导出到: {file_path}")
+            messagebox.showinfo("成功", f"结果已导出到: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"导出结果失败: {str(e)}")
+            self.status_message.set(f"错误：导出结果失败 - {str(e)}")
+            messagebox.showerror("错误", f"导出结果失败: {str(e)}")
 
 # 自定义日志处理器
 class LogHandler(logging.Handler):
@@ -1813,6 +2470,7 @@ class LogHandler(logging.Handler):
             self.text_widget.config(state=tk.DISABLED)
         # 在UI线程中执行，以防止Tkinter线程问题
         self.text_widget.after(0, append)
+
 def main():
     """程序入口点"""
     try:
@@ -1826,12 +2484,6 @@ def main():
     except Exception as e:
         # 记录全局异常
         logger.error(f"程序发生严重错误: {str(e)}", exc_info=True)
-        # 尝试显示错误对话框
-        try:
-            import tkinter.messagebox as mb
-            mb.showerror("严重错误", f"程序发生错误，请联系开发人员:\n{str(e)}")
-        except:
-            print(f"严重错误: {str(e)}")
 
 if __name__ == "__main__":
     main()

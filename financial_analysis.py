@@ -45,7 +45,13 @@ if not TUSHARE_TOKEN:
     TUSHARE_TOKEN = "0e65a5c636112dc9d9af5ccc93ef06c55987805b9467db0866185a10"
 if TUSHARE_TOKEN:
     ts.set_token(TUSHARE_TOKEN)
-    pro = ts.pro_api()
+    # 直接创建API实例，不依赖token文件
+    try:
+        pro = ts.pro_api(TUSHARE_TOKEN)
+        logger.info(f"成功初始化Tushare API (Token前5位: {TUSHARE_TOKEN[:5]}...)")
+    except Exception as e:
+        logger.error(f"初始化Tushare API失败: {str(e)}")
+        pro = None
 else:
     pro = None
 

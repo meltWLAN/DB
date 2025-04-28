@@ -3,12 +3,19 @@
 
 import logging
 from datetime import datetime, timedelta
-from src.data import StockDataFetcher
+from src.data.fetcher import StockDataFetcher
 from src.utils.logger import get_logger
+import pytest
+import pandas as pd
 
 # 设置日志
 logger = get_logger(__name__)
 logger.setLevel(logging.DEBUG) # Explicitly set level if needed for tests
+
+@pytest.fixture
+def fetcher():
+    # 创建数据获取器实例
+    return StockDataFetcher()
 
 def test_data_fetching():
     """测试数据获取功能"""

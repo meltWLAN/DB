@@ -11,6 +11,22 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox
+import csv
+# 导入增强API可靠性模块
+try:
+    from enhance_api_reliability import (
+        enhance_get_stock_name, 
+        enhance_get_stock_names_batch, 
+        enhance_get_stock_industry,
+        with_retry
+    )
+    HAS_ENHANCED_API = True
+    logger = logging.getLogger(__name__)
+    logger.info("成功加载增强API可靠性模块到GUI控制器")
+except ImportError:
+    HAS_ENHANCED_API = False
+    logger = logging.getLogger(__name__)
+    logger.warning("无法加载增强API可靠性模块到GUI控制器，将使用基本API功能")
 # 确保当前目录在Python路径中
 current_dir = Path(__file__).parent
 if str(current_dir) not in sys.path:
@@ -30,8 +46,8 @@ except ImportError:
 # 配置日志
 logger = logging.getLogger(__name__)
 class GuiController:
-    # 使用LRU缓存优化数据加载
-    def __init__(self, use_tushare=False, cache_limit=128):
+    """GUI控制器类，连接GUI与分析模块"""
+    def __init__(self, use_tushare=True, cache_limit=128):
         """初始化控制器
         
         Args:
@@ -43,8 +59,28 @@ class GuiController:
         self._cache_keys = []
         self._cache_limit = cache_limit
         
+        # 记录是否使用增强API
+        self.using_enhanced_api = HAS_ENHANCED_API
+        
+        # 初始化分析器
+        self.momentum_analyzer = MomentumAnalyzer(use_tushare=use_tushare)
+        self.ma_strategy = MACrossStrategy(use_tushare=use_tushare)
+        self.financial_analyzer = FinancialAnalyzer(use_tushare=use_tushare)
+        self.stock_list = None
+        self.momentum_results = None
+        self.ma_results = None
+        self.combined_results = None
+        self.financial_results = None
+        
+        # 增强型API缓存
+        self._stock_name_cache = {}
+        self._industry_cache = {}
+        
         # 确保数据目录存在
         os.makedirs("data", exist_ok=True)
+        os.makedirs(LOG_DIR, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(RESULTS_DIR, exist_ok=True)
     
     def _get_cached_data(self, key):
         """从缓存获取数据"""
@@ -72,22 +108,7 @@ class GuiController:
         """清空缓存"""
         self._data_cache.clear()
         self._cache_keys.clear()
-        
-    """GUI控制器类，连接GUI与分析模块"""
-    def __init__(self, use_tushare=True):
-        """初始化控制器"""
-        self.momentum_analyzer = MomentumAnalyzer(use_tushare=use_tushare)
-        self.ma_strategy = MACrossStrategy(use_tushare=use_tushare)
-        self.financial_analyzer = FinancialAnalyzer(use_tushare=use_tushare)
-        self.stock_list = None
-        self.momentum_results = None
-        self.ma_results = None
-        self.combined_results = None
-        self.financial_results = None
-        # 确保目录存在
-        os.makedirs(LOG_DIR, exist_ok=True)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        os.makedirs(RESULTS_DIR, exist_ok=True)
+    
     def get_stock_list(self, industry=None):
         """获取股票列表"""
         try:
@@ -110,42 +131,77 @@ class GuiController:
             # 获取股票列表
             if self.stock_list is None or (industry is not None and industry != "全部"):
                 self.stock_list = self.get_stock_list(industry)
+            
             if self.stock_list.empty:
                 if gui_callback:
                     gui_callback("状态", "获取股票列表失败，请检查网络连接或数据源配置")
                 return None
+            
+            # 记录参数信息
+            logger.info(f"启动动量分析 - 样本数量: {sample_size}, 行业: {industry}, 最低分数: {min_score}")
+            
             if gui_callback:
                 gui_callback("状态", f"开始分析 {len(self.stock_list)} 支股票的动量...")
+            
             # 运行分析
             def run_analysis():
                 try:
-                    # 分析股票
-                    self.momentum_results = self.momentum_analyzer.analyze_stocks(
-                        self.stock_list, sample_size=sample_size, min_score=min_score)
-                    # 打印结果用于调试
-                    print(f"动量分析完成，结果数量: {len(self.momentum_results)}")
+                    # 确保有默认结果，即使分析出错
+                    default_results = []
+                    
+                    try:
+                        # 分析股票
+                        self.momentum_results = self.momentum_analyzer.analyze_stocks(
+                            self.stock_list, sample_size=sample_size, min_score=min_score)
+                        
+                        # 如果结果为空或None，使用空列表
+                        if not self.momentum_results:
+                            logger.warning("动量分析返回了空结果或None")
+                            self.momentum_results = []
+                    except Exception as analysis_error:
+                        # 记录错误但不中断
+                        logger.error(f"动量分析器内部错误: {str(analysis_error)}", exc_info=True)
+                        # 使用空结果继续
+                        self.momentum_results = default_results
+                    
+                    # 记录动量分析完成状态
+                    logger.info(f"动量分析完成，结果数量: {len(self.momentum_results)}")
+                    
+                    # 打印结果样本用于调试
                     if self.momentum_results and len(self.momentum_results) > 0:
-                        print(f"第一条结果: {self.momentum_results[0]}")
-                    # 在分析完成后调用GUI回调
+                        logger.info(f"动量分析首条结果: {self.momentum_results[0]}")
+                    
+                    # 确保总是返回结果，即使是空列表
                     if gui_callback:
-                        if self.momentum_results:
-                            # 直接调用回调，将结果传给GUI
-                            gui_callback("结果", self.momentum_results)
+                        gui_callback("结果", self.momentum_results)
+                        
+                        # 根据结果提供更详细的状态信息
+                        if len(self.momentum_results) > 0:
+                            gui_callback("状态", f"动量分析完成，找到 {len(self.momentum_results)} 支符合条件的股票")
                         else:
-                            gui_callback("状态", "动量分析完成，未找到符合条件的股票")
+                            gui_callback("状态", "动量分析完成，未找到符合条件的股票。尝试降低最低分数或更换行业。")
+                    
                 except Exception as e:
-                    logger.error(f"分析过程中出错: {str(e)}", exc_info=True)
+                    logger.error(f"动量分析线程出错: {str(e)}", exc_info=True)
+                    # 确保在任何情况下都返回结果
                     if gui_callback:
-                        gui_callback("状态", f"分析过程中出错: {str(e)}")
+                        gui_callback("状态", f"动量分析过程中出错: {str(e)}")
+                        # 即使出错也返回空结果，让调用者可以继续
+                        gui_callback("结果", [])
+            
             # 在新线程中运行分析
             analysis_thread = threading.Thread(target=run_analysis)
             analysis_thread.daemon = True
             analysis_thread.start()
+            
             return True
+        
         except Exception as e:
             logger.error(f"启动动量分析失败: {str(e)}", exc_info=True)
             if gui_callback:
                 gui_callback("状态", f"启动动量分析失败: {str(e)}")
+                # 即使启动失败也返回空结果
+                gui_callback("结果", [])
             return None
     def run_ma_cross_strategy(self, short_ma=5, long_ma=20, initial_capital=100000,
                              stop_loss_pct=0.05, sample_size=100, industry=None, gui_callback=None):
@@ -154,40 +210,83 @@ class GuiController:
             # 获取股票列表
             if self.stock_list is None or (industry is not None and industry != "全部"):
                 self.stock_list = self.get_stock_list(industry)
+            
             if self.stock_list.empty:
                 if gui_callback:
                     gui_callback("状态", "获取股票列表失败，请检查网络连接或数据源配置")
                 return None
+            
+            # 记录策略参数
+            logger.info(f"启动均线交叉策略 - 短期均线: {short_ma}, 长期均线: {long_ma}, 初始资金: {initial_capital}, 止损比例: {stop_loss_pct}, 样本数: {sample_size}, 行业: {industry}")
+            
             if gui_callback:
                 gui_callback("状态", f"开始分析 {len(self.stock_list)} 支股票的均线交叉策略...")
+            
             # 运行策略
             def run_strategy():
                 try:
-                    # 运行策略分析
-                    self.ma_results = self.ma_strategy.run_strategy(
-                        self.stock_list, short_ma=short_ma, long_ma=long_ma,
-                        initial_capital=initial_capital, stop_loss_pct=stop_loss_pct/100,
-                        sample_size=sample_size)
-                    # 在分析完成后调用GUI回调
+                    # 确保有默认结果，即使分析出错
+                    default_results = []
+                    
+                    try:
+                        # 运行策略分析
+                        self.ma_results = self.ma_strategy.run_strategy(
+                            self.stock_list, short_ma=short_ma, long_ma=long_ma,
+                            initial_capital=initial_capital, stop_loss_pct=stop_loss_pct/100,
+                            sample_size=sample_size)
+                        
+                        # 检查结果有效性
+                        if not self.ma_results:
+                            logger.warning("均线交叉策略返回了空结果或None")
+                            self.ma_results = []
+                    except Exception as strategy_error:
+                        # 记录错误但不中断
+                        logger.error(f"均线交叉策略内部错误: {str(strategy_error)}", exc_info=True)
+                        # 使用空结果继续
+                        self.ma_results = default_results
+                    
+                    # 记录策略分析完成状态
+                    logger.info(f"均线交叉策略分析完成，结果数量: {len(self.ma_results)}")
+                    
+                    # 打印结果样本用于调试
+                    if self.ma_results and len(self.ma_results) > 0:
+                        logger.info(f"均线交叉策略首条结果: {self.ma_results[0]}")
+                    
+                    # 确保总是返回结果，即使是空列表
                     if gui_callback:
-                        if self.ma_results:
-                            # 直接调用回调，将结果传给GUI
-                            gui_callback("结果", self.ma_results)
+                        gui_callback("结果", self.ma_results)
+                        
+                        # 根据结果提供更详细的状态信息
+                        if len(self.ma_results) > 0:
+                            buy_signals = sum(1 for r in self.ma_results if r.get('current_signal') == '买入')
+                            sell_signals = sum(1 for r in self.ma_results if r.get('current_signal') == '卖出')
+                            hold_signals = sum(1 for r in self.ma_results if r.get('current_signal') == '持有')
+                            
+                            gui_callback("状态", f"均线交叉策略分析完成，共{len(self.ma_results)}支股票 (买入:{buy_signals}, 卖出:{sell_signals}, 持有:{hold_signals})")
                         else:
-                            gui_callback("状态", "均线交叉策略分析完成，未得到有效结果")
+                            gui_callback("状态", "均线交叉策略分析完成，未找到有效结果。尝试调整均线参数或更换行业。")
+                
                 except Exception as e:
-                    logger.error(f"策略执行过程中出错: {str(e)}")
+                    logger.error(f"均线交叉策略线程出错: {str(e)}", exc_info=True)
+                    # 确保在任何情况下都返回结果
                     if gui_callback:
-                        gui_callback("状态", f"策略执行过程中出错: {str(e)}")
+                        gui_callback("状态", f"均线交叉策略执行过程中出错: {str(e)}")
+                        # 即使出错也返回空结果，让调用者可以继续
+                        gui_callback("结果", [])
+            
             # 在新线程中运行策略
             strategy_thread = threading.Thread(target=run_strategy)
             strategy_thread.daemon = True
             strategy_thread.start()
+            
             return True
+        
         except Exception as e:
-            logger.error(f"启动均线交叉策略失败: {str(e)}")
+            logger.error(f"启动均线交叉策略失败: {str(e)}", exc_info=True)
             if gui_callback:
                 gui_callback("状态", f"启动均线交叉策略失败: {str(e)}")
+                # 即使启动失败也返回空结果
+                gui_callback("结果", [])
             return None
     def get_market_overview(self, gui_callback=None):
         """获取市场概览信息"""
@@ -331,149 +430,240 @@ class GuiController:
             if gui_callback:
                 gui_callback("状态", f"保存组合策略结果失败: {str(e)}")
             return False
-    def run_combined_strategy(self, momentum_weight, ma_weight, sample_size, industry, min_score, short_ma, long_ma, initial_capital, stop_loss_pct, gui_callback):
-        """
-        运行组合策略分析
-        :param momentum_weight: 动量策略权重 (0-1)
-        :param ma_weight: 均线策略权重 (0-1)
-        :param sample_size: 分析的股票数量
-        :param industry: 行业过滤
-        :param min_score: 最低动量得分
-        :param short_ma: 短期均线
-        :param long_ma: 长期均线
-        :param initial_capital: 初始资金
-        :param stop_loss_pct: 止损百分比
-        :param gui_callback: GUI回调函数
-        """
-        # 通知GUI分析开始
-        gui_callback("状态", "开始运行组合策略分析...")
-        # 创建一个线程来执行策略分析
-        def run_analysis():
-            try:
-                logger.info(f"开始组合策略分析，参数: 动量权重={momentum_weight}, 均线权重={ma_weight}, 样本数={sample_size}, 行业={industry}")
-                # 获取股票列表
-                stock_list = self.get_stock_list(industry)
-                # 过滤行业
-                if industry != "全部" and 'industry' in stock_list.columns:
-                    stock_list = stock_list[stock_list['industry'] == industry]
-                # 随机选择股票，如果样本数大于可用股票数
-                if sample_size < len(stock_list):
-                    stock_list = stock_list.sample(sample_size)
-                stock_codes = stock_list['ts_code'].tolist()
-                # 通知GUI正在获取股票数据
-                gui_callback("状态", f"组合策略分析: 正在获取 {len(stock_codes)} 支股票的数据...")
-                # 并行分析多只股票
-                results = []
-                # 创建临时回调函数来收集结果
-                momentum_results = []
-                ma_results = []
-                # 动量分析回调
-                def momentum_callback(status_type, data):
-                    if status_type == "结果" and isinstance(data, list):
-                        nonlocal momentum_results
-                        momentum_results = data
-                        gui_callback("状态", f"组合策略: 动量分析完成，继续进行均线分析...")
-                # 均线分析回调
-                def ma_callback(status_type, data):
-                    if status_type == "结果" and isinstance(data, list):
-                        nonlocal ma_results
-                        ma_results = data
-                        gui_callback("状态", f"组合策略: 均线分析完成，开始组合评分...")
-                # 运行动量分析
-                self.run_momentum_analysis(
-                    sample_size=sample_size,
-                    industry=industry,
-                    min_score=min_score,
-                    gui_callback=momentum_callback
-                )
-                # 运行均线交叉分析
-                self.run_ma_cross_strategy(
-                    short_ma=short_ma,
-                    long_ma=long_ma,
-                    initial_capital=initial_capital,
-                    stop_loss_pct=stop_loss_pct,
-                    sample_size=sample_size,
-                    industry=industry,
-                    gui_callback=ma_callback
-                )
-                # 等待两个分析都完成
-                wait_count = 0
-                max_wait = 120  # 最多等待120秒
-                while (not momentum_results or not ma_results) and wait_count < max_wait:
-                    import time
-                    time.sleep(1)
-                    wait_count += 1
-                if wait_count >= max_wait:
-                    gui_callback("状态", "组合策略分析超时，请重试")
-                    return
-                # 合并结果
-                combined_results = []
-                momentum_map = {item['ts_code']: item for item in momentum_results}
-                ma_map = {item['ts_code']: item for item in ma_results}
-                # 获取所有出现在任一分析中的股票代码
-                all_codes = list(set(list(momentum_map.keys()) + list(ma_map.keys())))
-                for code in all_codes:
-                    # 如果股票在两个分析中都有结果，则合并
-                    if code in momentum_map and code in ma_map:
-                        m_item = momentum_map[code]
-                        ma_item = ma_map[code]
-                        # 创建合并项
-                        combined_item = {
-                            'ts_code': code,
-                            'name': m_item.get('name', ma_item.get('name', '')),
-                            'industry': m_item.get('industry', ma_item.get('industry', '')),
-                            'close': m_item.get('close', ma_item.get('close', 0)),
-                            'momentum_score': m_item.get('momentum_score', m_item.get('score', 0)),
-                            'ma_score': ma_item.get('score', 0),
-                            'ma_signal': ma_item.get('current_signal', '无信号'),
-                            'total_return': ma_item.get('total_return', 0),
-                            'win_rate': ma_item.get('win_rate', 0)
-                        }
-                        # 计算组合得分
-                        # 动量分数已经是0-100
-                        momentum_contribution = momentum_weight * combined_item['momentum_score']
-                        # 均线信号转换为分数: 买入=100, 持有=50, 卖出=0
-                        ma_signal_score = 0
-                        if combined_item['ma_signal'] == '买入':
-                            ma_signal_score = 100
-                        elif combined_item['ma_signal'] == '持有':
-                            ma_signal_score = 50
-                        ma_contribution = ma_weight * ma_signal_score
-                        # 计算组合得分
-                        combined_item['combined_score'] = momentum_contribution + ma_contribution
-                        # 添加到结果列表
-                        combined_results.append(combined_item)
-                # 按组合得分排序
-                combined_results = sorted(combined_results, key=lambda x: x['combined_score'], reverse=True)
-                # 添加排名
-                for i, item in enumerate(combined_results):
-                    item['rank'] = i + 1
-                # 如果结果不为空，保存到CSV并创建结果图表
-                if combined_results:
-                    # 保存结果到CSV
-                    output_dir = os.path.join('results', 'combined_strategy')
-                    os.makedirs(output_dir, exist_ok=True)
-                    # 创建CSV文件名，包含时间戳
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    csv_path = os.path.join(output_dir, f'combined_results_{timestamp}.csv')
-                    # 转换为DataFrame并保存
-                    result_df = pd.DataFrame(combined_results)
-                    result_df.to_csv(csv_path, index=False)
-                    logger.info(f"已将组合策略结果保存到 {csv_path}")
-                    # 通知GUI分析完成
-                    gui_callback("状态", f"组合策略分析完成，共有 {len(combined_results)} 支股票的结果")
-                    gui_callback("结果", combined_results)
-                else:
-                    logger.warning("组合策略分析没有产生任何结果")
-                    gui_callback("状态", "组合策略分析未产生任何结果")
-            except Exception as e:
-                logger.error(f"组合策略分析出错: {str(e)}", exc_info=True)
-                gui_callback("状态", f"组合策略分析错误: {str(e)}")
-        # 启动分析线程
-        analysis_thread = threading.Thread(target=run_analysis)
-        analysis_thread.daemon = True
-        analysis_thread.start()
-        return analysis_thread
+    def run_combined_strategy(self, momentum_weight=0.6, ma_weight=0.4, lookback_period=20, 
+                             rsi_threshold=70, ma_short=5, ma_long=20, initial_capital=100000,
+                             stop_loss_pct=0.05, sample_size=100, industry=None, gui_callback=None):
+        """运行组合策略（动量分析+均线交叉）"""
+        try:
+            # 获取股票列表
+            if self.stock_list is None or (industry is not None and industry != "全部"):
+                self.stock_list = self.get_stock_list(industry)
+                
+            if self.stock_list.empty:
+                if gui_callback:
+                    gui_callback("状态", "获取股票列表失败，请检查网络连接或数据源配置")
+                    # 确保返回空结果
+                    gui_callback("结果", [])
+                return None
+            
+            # 记录策略参数
+            logger.info(f"启动组合策略 - 动量权重: {momentum_weight}, 均线权重: {ma_weight}, "
+                       f"回溯期: {lookback_period}, RSI阈值: {rsi_threshold}, "
+                       f"短期均线: {ma_short}, 长期均线: {ma_long}, "
+                       f"初始资金: {initial_capital}, 止损比例: {stop_loss_pct}, "
+                       f"样本数: {sample_size}, 行业: {industry}")
+            
+            if gui_callback:
+                gui_callback("状态", f"开始分析 {len(self.stock_list)} 支股票的组合策略...")
+            
+            # 通过事件标志来跟踪动量和均线策略的完成情况
+            momentum_done = threading.Event()
+            ma_done = threading.Event()
+            
+            # 存储策略结果的变量
+            momentum_results = []
+            ma_results = []
+            
+            # 动量策略回调
+            def momentum_callback(msg_type, data):
+                nonlocal momentum_results
+                if msg_type == "状态":
+                    if gui_callback:
+                        gui_callback("状态", f"组合策略: {data}")
+                elif msg_type == "结果":
+                    momentum_results = data if data else []
+                    logger.info(f"组合策略: 动量分析完成，获得结果数量: {len(momentum_results)}")
+                    momentum_done.set()  # 标记动量分析完成
+                    
+                    if gui_callback:
+                        gui_callback("状态", "组合策略: 动量分析完成，继续进行均线分析...")
+            
+            # 均线策略回调
+            def ma_callback(msg_type, data):
+                nonlocal ma_results
+                if msg_type == "状态":
+                    if gui_callback:
+                        gui_callback("状态", f"组合策略: {data}")
+                elif msg_type == "结果":
+                    ma_results = data if data else []
+                    logger.info(f"组合策略: 均线分析完成，获得结果数量: {len(ma_results)}")
+                    ma_done.set()  # 标记均线分析完成
+                    
+                    if gui_callback:
+                        gui_callback("状态", "组合策略: 均线分析完成，开始合并结果...")
+            
+            # 运行组合策略
+            def run_combined():
+                try:
+                    # 运行动量分析
+                    self.run_momentum_analysis(
+                        lookback_period=lookback_period,
+                        rsi_threshold=rsi_threshold,
+                        sample_size=sample_size,
+                        industry=industry,
+                        gui_callback=momentum_callback
+                    )
+                    
+                    # 运行均线交叉策略
+                    self.run_ma_cross_strategy(
+                        short_ma=ma_short,
+                        long_ma=ma_long,
+                        initial_capital=initial_capital,
+                        stop_loss_pct=stop_loss_pct,
+                        sample_size=sample_size,
+                        industry=industry,
+                        gui_callback=ma_callback
+                    )
+                    
+                    # 等待两个策略完成，最多等待120秒
+                    all_completed = all([
+                        momentum_done.wait(120),  # 等待动量分析完成
+                        ma_done.wait(120)         # 等待均线分析完成
+                    ])
+                    
+                    if not all_completed:
+                        logger.warning("组合策略: 一个或多个子策略未在规定时间内完成，将使用已有结果继续")
+                    
+                    # 记录两个策略的结果状态
+                    logger.info(f"组合策略: 动量分析结果数量: {len(momentum_results)}, 均线分析结果数量: {len(ma_results)}")
+                    
+                    # 检查两个策略是否都有结果
+                    if not momentum_results and not ma_results:
+                        logger.warning("组合策略: 两个子策略都没有返回结果")
+                        if gui_callback:
+                            gui_callback("状态", "组合策略: 未找到符合条件的股票，尝试调整参数")
+                            gui_callback("结果", [])
+                        return
+                    
+                    # 将两个策略结果合并
+                    combined_results = []
+                    
+                    # 创建股票代码到结果的映射
+                    momentum_dict = {result['code']: result for result in momentum_results} if momentum_results else {}
+                    ma_dict = {result['code']: result for result in ma_results} if ma_results else {}
+                    
+                    # 获取所有唯一的股票代码
+                    all_codes = set(momentum_dict.keys()).union(set(ma_dict.keys()))
+                    logger.info(f"组合策略: 合并结果中的唯一股票数量: {len(all_codes)}")
+                    
+                    # 处理每支股票
+                    for code in all_codes:
+                        try:
+                            # 初始化组合结果
+                            combined_result = {'code': code, 'name': '', 'combined_score': 0}
+                            
+                            # 从动量结果获取信息
+                            if code in momentum_dict:
+                                momentum_result = momentum_dict[code]
+                                combined_result['name'] = momentum_result.get('name', '')
+                                combined_result['momentum_score'] = momentum_result.get('total_score', 0)
+                                # 复制其他动量分析相关字段
+                                for key in ['price_momentum', 'volume_momentum', 'rsi', 'macd', 'kdj']:
+                                    if key in momentum_result:
+                                        combined_result[key] = momentum_result[key]
+                            else:
+                                combined_result['momentum_score'] = 0
+                                logger.debug(f"组合策略: 股票 {code} 没有动量分析结果")
+                            
+                            # 从均线结果获取信息
+                            if code in ma_dict:
+                                ma_result = ma_dict[code]
+                                if not combined_result['name'] and 'name' in ma_result:
+                                    combined_result['name'] = ma_result.get('name', '')
+                                combined_result['ma_signal'] = ma_result.get('current_signal', '无信号')
+                                combined_result['ma_score'] = 1 if ma_result.get('current_signal') == '买入' else 0
+                                # 复制其他均线分析相关字段
+                                for key in ['profit_loss', 'win_rate', 'max_drawdown']:
+                                    if key in ma_result:
+                                        combined_result[key] = ma_result[key]
+                            else:
+                                combined_result['ma_score'] = 0
+                                combined_result['ma_signal'] = '无信号'
+                                logger.debug(f"组合策略: 股票 {code} 没有均线分析结果")
+                            
+                            # 计算组合得分
+                            momentum_score = combined_result.get('momentum_score', 0)
+                            ma_score = combined_result.get('ma_score', 0)
+                            
+                            # 归一化动量得分到0-1范围
+                            norm_momentum = min(max(momentum_score / 100, 0), 1) if momentum_score else 0
+                            
+                            # 计算加权组合得分
+                            combined_result['combined_score'] = (
+                                norm_momentum * momentum_weight + 
+                                ma_score * ma_weight
+                            )
+                            
+                            # 添加到结果列表
+                            combined_results.append(combined_result)
+                        except Exception as stock_error:
+                            logger.error(f"组合策略: 处理股票 {code} 时出错: {str(stock_error)}", exc_info=True)
+                    
+                    # 按组合得分排序
+                    combined_results = sorted(combined_results, key=lambda x: x.get('combined_score', 0), reverse=True)
+                    
+                    # 记录结果数量和得分范围
+                    score_range = (
+                        combined_results[0].get('combined_score', 0) if combined_results else 0,
+                        combined_results[-1].get('combined_score', 0) if combined_results else 0
+                    )
+                    logger.info(f"组合策略: 合并完成，共 {len(combined_results)} 支股票，得分范围: {score_range}")
+                    
+                    # 保存结果
+                    if combined_results:
+                        try:
+                            # 设置日期时间戳
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            filepath = f"./results/combined_strategy_{timestamp}.csv"
+                            
+                            # 确保目录存在
+                            os.makedirs("./results", exist_ok=True)
+                            
+                            # 将结果保存为CSV
+                            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                                writer = csv.DictWriter(f, fieldnames=combined_results[0].keys())
+                                writer.writeheader()
+                                writer.writerows(combined_results)
+                                
+                            logger.info(f"组合策略: 结果已保存至 {filepath}")
+                            
+                            if gui_callback:
+                                gui_callback("状态", f"组合策略: 分析完成，共 {len(combined_results)} 支股票")
+                                gui_callback("结果", combined_results)
+                                
+                        except Exception as save_error:
+                            logger.error(f"组合策略: 保存结果时出错: {str(save_error)}", exc_info=True)
+                            # 即使保存失败也要尝试返回结果
+                            if gui_callback:
+                                gui_callback("状态", f"组合策略: 分析完成但保存失败: {str(save_error)}")
+                                gui_callback("结果", combined_results)
+                    else:
+                        logger.warning("组合策略: 未生成任何合并结果")
+                        if gui_callback:
+                            gui_callback("状态", "组合策略: 未找到满足条件的股票")
+                            gui_callback("结果", [])
+                
+                except Exception as e:
+                    logger.error(f"组合策略执行过程中出错: {str(e)}", exc_info=True)
+                    if gui_callback:
+                        gui_callback("状态", f"组合策略执行过程中出错: {str(e)}")
+                        # 确保即使出错也返回一个空的结果列表
+                        gui_callback("结果", [])
+            
+            # 在新线程中运行组合策略
+            combined_thread = threading.Thread(target=run_combined)
+            combined_thread.daemon = True
+            combined_thread.start()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"启动组合策略失败: {str(e)}", exc_info=True)
+            if gui_callback:
+                gui_callback("状态", f"启动组合策略失败: {str(e)}")
+                # 确保在任何情况下都返回结果
+                gui_callback("结果", [])
+            return None
     def run_financial_analysis(self, sample_size=100, industry=None, min_score=60, gui_callback=None):
         """运行财务分析"""
         try:
@@ -676,3 +866,157 @@ class GuiController:
             if gui_callback:
                 gui_callback("状态", f"启动综合分析失败: {str(e)}")
             return None
+    
+    def get_stock_name(self, ts_code):
+        """获取股票名称（支持增强API）"""
+        # 检查本地缓存
+        if ts_code in self._stock_name_cache:
+            return self._stock_name_cache[ts_code]
+        
+        # 使用增强API
+        if self.using_enhanced_api:
+            try:
+                name = enhance_get_stock_name(ts_code)
+                self._stock_name_cache[ts_code] = name
+                return name
+            except Exception as e:
+                logger.warning(f"使用增强API获取股票名称失败: {e}")
+                # 失败后尝试使用基本方法
+        
+        # 使用基本方法
+        try:
+            # 尝试从stock_list中查找
+            if self.stock_list is not None and not self.stock_list.empty and 'ts_code' in self.stock_list.columns and 'name' in self.stock_list.columns:
+                matched = self.stock_list[self.stock_list['ts_code'] == ts_code]
+                if not matched.empty:
+                    name = matched.iloc[0]['name']
+                    self._stock_name_cache[ts_code] = name
+                    return name
+            
+            # 尝试使用动量分析器获取
+            name = self.momentum_analyzer.get_stock_name(ts_code)
+            if name:
+                self._stock_name_cache[ts_code] = name
+                return name
+        except Exception as e:
+            logger.error(f"获取股票名称失败: {e}")
+        
+        # 返回默认名称
+        default_name = f"股票{ts_code.split('.')[0]}"
+        self._stock_name_cache[ts_code] = default_name
+        return default_name
+    
+    def get_stock_names_batch(self, ts_codes):
+        """批量获取股票名称（支持增强API）"""
+        results = {}
+        missing_codes = []
+        
+        # 先检查本地缓存
+        for ts_code in ts_codes:
+            if ts_code in self._stock_name_cache:
+                results[ts_code] = self._stock_name_cache[ts_code]
+            else:
+                missing_codes.append(ts_code)
+        
+        # 如果有未缓存的代码，使用增强API批量获取
+        if missing_codes and self.using_enhanced_api:
+            try:
+                batch_results = enhance_get_stock_names_batch(missing_codes)
+                # 更新结果和缓存
+                for code, name in batch_results.items():
+                    results[code] = name
+                    self._stock_name_cache[code] = name
+                # 清空已处理的代码
+                missing_codes = []
+            except Exception as e:
+                logger.warning(f"使用增强API批量获取股票名称失败: {e}")
+                # 失败的代码会继续使用基本方法处理
+        
+        # 对于仍然缺失的代码，逐个使用基本方法获取
+        for ts_code in missing_codes:
+            results[ts_code] = self.get_stock_name(ts_code)
+        
+        return results
+    
+    def get_stock_industry(self, ts_code):
+        """获取股票行业（支持增强API）"""
+        # 检查本地缓存
+        if ts_code in self._industry_cache:
+            return self._industry_cache[ts_code]
+        
+        # 使用增强API
+        if self.using_enhanced_api:
+            try:
+                industry = enhance_get_stock_industry(ts_code)
+                self._industry_cache[ts_code] = industry
+                return industry
+            except Exception as e:
+                logger.warning(f"使用增强API获取股票行业失败: {e}")
+                # 失败后尝试使用基本方法
+        
+        # 使用基本方法
+        try:
+            # 尝试从stock_list中查找
+            if self.stock_list is not None and not self.stock_list.empty and 'ts_code' in self.stock_list.columns and 'industry' in self.stock_list.columns:
+                matched = self.stock_list[self.stock_list['ts_code'] == ts_code]
+                if not matched.empty and pd.notna(matched.iloc[0]['industry']):
+                    industry = matched.iloc[0]['industry']
+                    self._industry_cache[ts_code] = industry
+                    return industry
+            
+            # 尝试使用动量分析器获取
+            if hasattr(self.momentum_analyzer, 'get_stock_industry'):
+                industry = self.momentum_analyzer.get_stock_industry(ts_code)
+                if industry:
+                    self._industry_cache[ts_code] = industry
+                    return industry
+        except Exception as e:
+            logger.error(f"获取股票行业失败: {e}")
+        
+        # 返回默认行业
+        default_industry = "未知行业"
+        self._industry_cache[ts_code] = default_industry
+        return default_industry
+    
+    def clear_enhanced_cache(self):
+        """清除增强API相关的缓存"""
+        self._stock_name_cache.clear()
+        self._industry_cache.clear()
+        
+        # 如果存在增强API的缓存更新函数，也调用它
+        if self.using_enhanced_api:
+            try:
+                from enhance_api_reliability import update_cache_now
+                update_cache_now()
+                logger.info("已清除增强API缓存")
+            except Exception as e:
+                logger.error(f"清除增强API缓存失败: {e}")
+        
+        return {
+            "status": "success",
+            "cleared": True,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
+    def get_api_stats(self):
+        """获取API统计信息"""
+        if not self.using_enhanced_api:
+            return {
+                "status": "not_available",
+                "message": "未使用增强API模块"
+            }
+        
+        try:
+            from enhance_api_reliability import get_cache_manager
+            stats = get_cache_manager()
+            return {
+                "status": "success",
+                "data": stats,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        except Exception as e:
+            logger.error(f"获取API统计信息失败: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }

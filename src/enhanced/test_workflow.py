@@ -35,6 +35,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# @with_cache(method_name="test_data_fetching")  # 注释掉这一行，因为它引用了未定义的装饰器
 def test_data_fetching():
     """测试数据获取功能"""
     logger.info("=" * 50)

@@ -47,7 +47,13 @@ if not TUSHARE_TOKEN:
     TUSHARE_TOKEN = "0e65a5c636112dc9d9af5ccc93ef06c55987805b9467db0866185a10"
 if TUSHARE_TOKEN:
     ts.set_token(TUSHARE_TOKEN)
-    pro = ts.pro_api()
+    # 直接创建API实例，不依赖token文件
+    try:
+        pro = ts.pro_api(TUSHARE_TOKEN)
+        logger.info(f"成功初始化Tushare API (Token前5位: {TUSHARE_TOKEN[:5]}...)")
+    except Exception as e:
+        logger.error(f"初始化Tushare API失败: {str(e)}")
+        pro = None
 else:
     pro = None
     logger.warning("未设置Tushare Token，将使用本地数据")
@@ -120,11 +126,15 @@ class MACrossStrategy:
             return self.data_cache[cache_key]
         if self.use_tushare:
             try:
-                # 从Tushare获取日线数据
-                df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
-                if df.empty:
-                    # 尝试使用备用API
-                    df = ts.pro_bar(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                # 直接使用ts.pro_bar获取数据，与momentum_analysis.py保持一致
+                ts.set_token(TUSHARE_TOKEN)
+                df = ts.pro_bar(ts_code=ts_code, adj='qfq', start_date=start_date, end_date=end_date)
+                
+                # 如果pro_bar获取失败，尝试使用daily接口
+                if df is None or df.empty:
+                    logger.warning(f"通过pro_bar获取{ts_code}数据为空，尝试使用daily接口")
+                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                
                 if not df.empty:
                     # 确保日期列为索引并按日期排序
                     if 'trade_date' in df.columns:

@@ -52,22 +52,27 @@ class EnhancedGuiController(GuiController):
         self.cached_enhanced_results = None  # 缓存增强版分析结果
         logger.info("增强版GUI控制器初始化完成")
         
-    def get_enhanced_momentum_analysis(self, industry=None, sample_size=100, min_score=70):
+    def get_enhanced_momentum_analysis(self, industry=None, sample_size=100, min_score=70, gui_callback=None):
         """获取增强版动量分析结果
         
         Args:
             industry: 行业名称，默认为None（全部行业）
             sample_size: 样本大小
             min_score: 最低分数
+            gui_callback: GUI回调函数，用于更新进度条
             
         Returns:
             list: 分析结果
         """
         try:
             logger.info(f"开始增强版动量分析 - 行业: {industry if industry else '全部'}, 样本: {sample_size}, 最低分: {min_score}")
+            if gui_callback:
+                gui_callback("progress", (f"开始增强版动量分析 - 行业: {industry if industry else '全部'}, 样本: {sample_size}", 5))
             
             # 获取股票列表
             stocks = self.momentum_analyzer.get_stock_list()
+            if gui_callback:
+                gui_callback("progress", (f"获取到 {len(stocks)} 支股票", 10))
             
             # 热门板块映射
             hot_sectors_keywords = {
@@ -99,22 +104,33 @@ class EnhancedGuiController(GuiController):
                     # 应用筛选
                     stocks = stocks[mask]
                     logger.info(f"按热门板块'{industry}'筛选后，股票数量: {len(stocks)}")
+                    if gui_callback:
+                        gui_callback("progress", (f"按热门板块'{industry}'筛选后，股票数量: {len(stocks)}", 15))
                 else:
                     # 传统行业筛选
                     stocks = stocks[stocks['industry'] == industry]
                     logger.info(f"按行业'{industry}'筛选后，股票数量: {len(stocks)}")
+                    if gui_callback:
+                        gui_callback("progress", (f"按行业'{industry}'筛选后，股票数量: {len(stocks)}", 15))
             
             # 检查股票列表是否为空
             if stocks.empty:
                 logger.warning(f"行业'{industry}'筛选后股票列表为空，改为分析全部股票")
+                if gui_callback:
+                    gui_callback("progress", (f"行业'{industry}'筛选后股票列表为空，改为分析全部股票", 20))
                 stocks = self.momentum_analyzer.get_stock_list()
                 if stocks.empty:
                     logger.error("获取股票列表失败，无法进行分析")
+                    if gui_callback:
+                        gui_callback("progress", ("获取股票列表失败，无法进行分析", 100))
                     return []
             
             # 计算增强版分析结果
             results = self.momentum_analyzer.analyze_stocks_enhanced(
-                stocks, sample_size=sample_size, min_score=min_score
+                stocks, 
+                min_score=min_score,
+                sample_size=sample_size,
+                gui_callback=gui_callback
             )
             
             # 缓存结果
@@ -129,24 +145,30 @@ class EnhancedGuiController(GuiController):
                 frontend_result = {
                     'code': r['ts_code'],
                     'name': r['name'],
-                    'industry': r['industry'],
-                    'close': r['close'],
-                    'momentum_20d': r['momentum_20d'],
-                    'rsi': r['rsi'],
-                    'macd_hist': r['macd_hist'],
-                    'volume_ratio': r['volume_ratio'],
-                    'industry_factor': r['industry_factor'],
-                    'base_score': r['base_score'],
+                    'industry': r.get('industry', '未知'),
+                    'close': r.get('last_price', 0.0),
+                    'momentum_20d': r.get('momentum_20d', 0.0),
+                    'rsi': r.get('rsi', 0.0),
+                    'macd_hist': r.get('macd_hist', 0.0),
+                    'volume_ratio': r.get('volume_ratio', 1.0),
+                    'industry_factor': r.get('industry_factor', 1.0),
+                    'base_score': r.get('base_score', 0),
                     'score': r['score'],
-                    'chart_path': chart_path if os.path.exists(chart_path) else None
+                    'chart_path': chart_path if os.path.exists(chart_path) else None,
+                    'signals': r.get('signals', {}),
+                    'change_pct': r.get('change_pct', 0.0)
                 }
                 frontend_results.append(frontend_result)
                 
             logger.info(f"增强版动量分析完成，返回结果数量: {len(frontend_results)}")
+            if gui_callback:
+                gui_callback("progress", (f"增强版动量分析完成，返回结果数量: {len(frontend_results)}", 100))
             return frontend_results
             
         except Exception as e:
             logger.error(f"获取增强版动量分析出错: {str(e)}")
+            if gui_callback:
+                gui_callback("progress", (f"获取增强版动量分析出错: {str(e)}", 100))
             return []
             
     def get_enhanced_stock_detail(self, ts_code):
@@ -164,28 +186,29 @@ class EnhancedGuiController(GuiController):
                 for r in self.cached_enhanced_results:
                     if r['ts_code'] == ts_code:
                         # 获取数据
-                        data = r['data']
-                        score_details = r['score_details']
+                        data = r.get('data', pd.DataFrame())  # 使用get方法并提供默认值
+                        score_details = r.get('score_details', {})
                         
                         # 合并详情
                         detail = {
                             'ts_code': ts_code,
                             'name': r['name'],
-                            'industry': r['industry'],
-                            'close': r['close'],
+                            'industry': r.get('industry', '未知'),
+                            'close': r.get('last_price', r.get('close', 0.0)),
                             'base_indicators': {
-                                'rsi': r['rsi'],
-                                'macd': r['macd'],
-                                'macd_hist': r['macd_hist'],
-                                'momentum_20': r['momentum_20'],
-                                'volume_ratio': r['volume_ratio']
+                                'rsi': r.get('rsi', 0.0),
+                                'macd': r.get('macd', 0.0),
+                                'macd_hist': r.get('macd_hist', 0.0),
+                                'momentum_20': r.get('momentum_20d', r.get('momentum_20', 0.0)),
+                                'volume_ratio': r.get('volume_ratio', 1.0)
                             },
                             'enhanced_indicators': {
-                                'industry_factor': r['industry_factor']
+                                'industry_factor': r.get('industry_factor', 1.0)
                             },
                             'score_details': score_details,
                             'total_score': r['score'],
-                            'daily_data': data.tail(60).to_dict('records')  # 最近60天数据
+                            'signals': r.get('signals', {}),
+                            'daily_data': data.tail(60).to_dict('records') if hasattr(data, 'tail') else []  # 最近60天数据
                         }
                         
                         # 获取图表路径
