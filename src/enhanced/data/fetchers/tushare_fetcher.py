@@ -24,19 +24,19 @@ class EnhancedTushareFetcher:
     实现与TuShare API的交互，提供数据下载和转换功能
     """
     
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict = None):
         """
         初始化TuShare获取器
         
         Args:
             config: 配置字典，包含api_token等信息
         """
-        self.config = config
-        self.token = config.get('token', '')
+        self.config = config or {}
+        self.token = self.config.get('token', '')
         self.api = None
-        self.connection_retries = config.get('connection_retries', 3)
-        self.retry_delay = config.get('retry_delay', 2)
-        self.rate_limit = config.get('rate_limit', 3)  # 每秒请求数
+        self.connection_retries = self.config.get('connection_retries', 3)
+        self.retry_delay = self.config.get('retry_delay', 2)
+        self.rate_limit = self.config.get('rate_limit', 3)  # 每秒请求数
         self.request_interval = 1.0 / self.rate_limit if self.rate_limit > 0 else 0
         self.last_request_time = 0
         
@@ -48,8 +48,13 @@ class EnhancedTushareFetcher:
     def _init_api(self):
         """初始化TuShare API连接"""
         try:
-            self.api = ts.pro_api(self.token)
-            logger.info("TuShare API连接成功")
+            if self.token:
+                ts.set_token(self.token)
+                self.api = ts.pro_api()
+                logger.info(f"TuShare API连接成功，Token前5位: {self.token[:5]}...")
+            else:
+                logger.warning("未提供TuShare Token，将使用受限功能")
+                self.api = ts.pro_api()
         except Exception as e:
             logger.error(f"TuShare API连接失败: {str(e)}")
             self.api = None
@@ -125,9 +130,9 @@ class EnhancedTushareFetcher:
         try:
             # 获取股票基本信息
             data = self._execute_api_call('stock_basic', 
-                                        exchange='', 
-                                        list_status='L',
-                                        fields='ts_code,symbol,name,area,industry,list_date')
+                                          exchange='', 
+                                          list_status='L',
+                                          fields='ts_code,symbol,name,area,industry,list_date')
             
             if data is not None and not data.empty:
                 # 添加交易所列
@@ -143,7 +148,7 @@ class EnhancedTushareFetcher:
                     'list_date': 'list_date'
                 })
                 
-                logger.debug(f"获取到 {len(data)} 只股票基本信息")
+                logger.info(f"获取到 {len(data)} 只股票基本信息")
                 return data
             
             return None
@@ -199,7 +204,7 @@ class EnhancedTushareFetcher:
             
             return None
         except Exception as e:
-            logger.error(f"获取 {stock_code} 的日线数据失败: {str(e)}")
+            logger.error(f"获取日线数据失败: {str(e)}")
             return None
     
     def get_industry_list(self) -> Optional[pd.DataFrame]:

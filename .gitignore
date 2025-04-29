@@ -1,12 +1,76 @@
-# Python缓存
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-.python-version
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 日志文件
+logs/
+*.log
+
+# 缓存
+cache/
+.cache/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 环境
+venv/
+env/
+ENV/
+
+# 数据文件
+*.csv
+*.xlsx
+*.xls
+*.db
+*.sqlite3
+
+# 配置文件（包含敏感信息）
+config.ini
+secrets.json
+.env
+
+# 临时文件
+temp/
+tmp/
+.temp/
+.tmp/
+
+# 模型文件（根据需要可以注释掉）
+# models/
+
+# 测试覆盖率报告
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
 
 # 数据和缓存文件
 data/
-cache/
 *.db
 *.db-shm
 *.db-wal
@@ -14,21 +78,8 @@ cache/
 *.csv
 results/
 
-# 日志文件
-logs/
-*.log
-
 # 系统文件
-.DS_Store
 .cursor/
-.vscode/
-.idea/
-.pytest_cache/
-
-# 虚拟环境
-venv/
-env/
-ENV/
 
 # 备份文件
 *_backup*
@@ -36,13 +87,11 @@ ENV/
 backup*/
 _archive/
 
+# Distribution / packaging
+*.egg-info/
+
 # 环境文件
 .env
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
 
 # IDE files
 *.swp

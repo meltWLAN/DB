@@ -2,427 +2,295 @@
 # -*- coding: utf-8 -*-
 
 """
-暴涨股捕捉控制器
-负责将暴涨股跟踪器集成到主系统，处理GUI回调和数据展示
+热门股票控制器
+实现热门股票分析功能与GUI的交互
 """
 
 import os
-import sys
-import time
 import logging
-import threading
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Union, Callable
+from typing import Dict, List, Any, Optional, Union
 
-# 导入策略模块
+# 导入热门股票跟踪器
 from src.strategies.hot_stock_tracker import HotStockTracker
+
+# 尝试导入增强版数据模块（如果可用）
+HAS_ENHANCED_MODULES = False
+try:
+    from src.enhanced.data.fetchers.tushare_fetcher import EnhancedTushareFetcher
+    from src.enhanced.data.processors.optimized_processor import EnhancedDataProcessor
+    HAS_ENHANCED_MODULES = True
+except ImportError:
+    logging.warning("未能导入增强版数据模块，将使用基础版功能")
 
 # 设置日志
 logger = logging.getLogger(__name__)
 
 class HotStockController:
-    """暴涨股捕捉控制器，处理暴涨股模块与GUI的交互"""
+    """热门股票控制器，处理前端请求并返回分析结果"""
     
-    def __init__(self, tushare_fetcher=None, data_processor=None):
+    def __init__(self, config=None, tushare_fetcher=None, data_processor=None):
         """初始化控制器
         
         Args:
-            tushare_fetcher: TuShare数据获取器
+            config: 配置字典
+            tushare_fetcher: 数据获取器
             data_processor: 数据处理器
         """
+        self.config = config or {}
+        
+        # 默认配置
+        self.default_config = {
+            'api_token': '',  # TuShare API Token
+            'data_quality_threshold': 60,  # 数据质量阈值
+            'max_missing_days': 5,  # 最大允许缺失天数
+            'min_trading_days': 60,  # 最小交易天数要求
+            'connection_retries': 3,  # 连接重试次数
+            'retry_delay': 2,  # 重试延迟（秒）
+        }
+        
+        # 合并配置
+        for key, value in self.default_config.items():
+            if key not in self.config:
+                self.config[key] = value
+        
+        # 如果没有提供数据获取器和处理器，尝试创建增强版模块的实例
+        if tushare_fetcher is None and HAS_ENHANCED_MODULES:
+            logger.info("创建默认的增强版TuShare数据获取器")
+            tushare_fetcher = EnhancedTushareFetcher(config)
+        
+        if data_processor is None and HAS_ENHANCED_MODULES:
+            logger.info("创建默认的增强版数据处理器")
+            data_processor = EnhancedDataProcessor(config)
+        
+        # 创建热门股票跟踪器
         self.tracker = HotStockTracker(tushare_fetcher, data_processor)
-        self.last_results = {}
-        self.analysis_thread = None
-        self.running = False
+        logger.info("热门股票控制器初始化完成")
         
         # 创建结果目录
         self.results_dir = os.path.join('results', 'hot_stocks')
         os.makedirs(self.results_dir, exist_ok=True)
     
-    def scan_limit_up_stocks(self, days=1, end_date=None, gui_callback=None):
-        """扫描连续涨停股票
+    def get_consecutive_limit_up_stocks(self, consecutive_days=1, end_date=None):
+        """获取连续涨停股票
         
         Args:
-            days: 连续涨停天数
-            end_date: 结束日期
-            gui_callback: GUI回调函数
+            consecutive_days: 连续涨停天数
+            end_date: 结束日期，格式 YYYY-MM-DD
             
         Returns:
-            pd.DataFrame: 涨停股票数据
+            pd.DataFrame: 连续涨停股票数据
         """
-        if gui_callback:
-            gui_callback("状态", f"正在扫描连续{days}天涨停的股票...")
-        
         try:
-            # 获取连续涨停股
-            limit_up_stocks = self.tracker.get_consecutive_limit_up_stocks(days, end_date)
-            
-            if limit_up_stocks is not None and not limit_up_stocks.empty:
-                if gui_callback:
-                    gui_callback("状态", f"找到 {len(limit_up_stocks)} 只连续{days}天涨停的股票")
-                    gui_callback("涨停股", limit_up_stocks.to_dict('records'))
-                
-                # 保存结果
-                self.last_results[f'limit_up_{days}'] = limit_up_stocks
-                
-                return limit_up_stocks
-            else:
-                if gui_callback:
-                    gui_callback("状态", f"未找到连续{days}天涨停的股票")
-                return pd.DataFrame()
-            
+            logger.info(f"请求获取连续{consecutive_days}天涨停的股票，截止日期: {end_date or '今日'}")
+            result = self.tracker.get_consecutive_limit_up_stocks(consecutive_days, end_date)
+            return result
         except Exception as e:
-            logger.error(f"扫描连续涨停股票时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"扫描连续涨停股票时出错: {str(e)}")
+            logger.error(f"获取连续涨停股票时出错: {str(e)}")
             return pd.DataFrame()
     
-    def scan_potential_breakout_stocks(self, threshold_score=70, end_date=None, gui_callback=None):
-        """扫描潜在暴涨股
+    def get_potential_breakout_stocks(self, threshold_score=70, end_date=None):
+        """获取潜在暴涨股
         
         Args:
-            threshold_score: 最低爆发潜力得分
-            end_date: 结束日期
-            gui_callback: GUI回调函数
+            threshold_score: 最小爆发潜力得分 (0-100)
+            end_date: 结束日期，格式 YYYY-MM-DD
             
         Returns:
             pd.DataFrame: 潜在暴涨股数据
         """
-        if gui_callback:
-            gui_callback("状态", "正在分析潜在爆发股票...")
-        
         try:
-            # 获取潜在爆发股
-            potential_stocks = self.tracker.identify_potential_breakout_stocks(end_date, threshold_score)
-            
-            if potential_stocks is not None and not potential_stocks.empty:
-                if gui_callback:
-                    gui_callback("状态", f"找到 {len(potential_stocks)} 只潜在爆发股票")
-                    gui_callback("潜在爆发股", potential_stocks.to_dict('records'))
-                
-                # 保存结果
-                self.last_results['potential_breakout'] = potential_stocks
-                
-                return potential_stocks
-            else:
-                if gui_callback:
-                    gui_callback("状态", "未找到符合条件的潜在爆发股票")
-                return pd.DataFrame()
-            
+            logger.info(f"请求获取潜在暴涨股，得分阈值: {threshold_score}，截止日期: {end_date or '今日'}")
+            result = self.tracker.identify_potential_breakout_stocks(end_date, threshold_score)
+            return result
         except Exception as e:
-            logger.error(f"扫描潜在暴涨股时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"扫描潜在暴涨股时出错: {str(e)}")
+            logger.error(f"获取潜在暴涨股时出错: {str(e)}")
             return pd.DataFrame()
     
-    def analyze_hot_sectors(self, top_n=10, consecutive_days=3, end_date=None, gui_callback=None):
-        """分析热门板块
+    def get_hot_sectors(self, top_n=10, consecutive_days=3, end_date=None):
+        """获取热门板块
         
         Args:
             top_n: 返回前N个热门板块
             consecutive_days: 分析的天数
-            end_date: 结束日期
-            gui_callback: GUI回调函数
+            end_date: 结束日期，格式 YYYY-MM-DD
             
         Returns:
             Dict: 热门板块数据
         """
-        if gui_callback:
-            gui_callback("状态", "正在分析热门板块...")
-        
         try:
-            # 获取热门板块
-            hot_sectors = self.tracker.analyze_hot_sectors(top_n, consecutive_days, end_date)
-            
-            if hot_sectors and 'hot_sectors' in hot_sectors and hot_sectors['hot_sectors']:
-                if gui_callback:
-                    gui_callback("状态", f"分析完成，找到 {len(hot_sectors['hot_sectors'])} 个热门板块")
-                    gui_callback("热门板块", hot_sectors)
-                
-                # 保存结果
-                self.last_results['hot_sectors'] = hot_sectors
-                
-                return hot_sectors
-            else:
-                if gui_callback:
-                    gui_callback("状态", "未找到热门板块数据")
-                return {'hot_sectors': []}
-            
+            logger.info(f"请求获取热门板块，Top {top_n}，分析天数: {consecutive_days}，截止日期: {end_date or '今日'}")
+            result = self.tracker.analyze_hot_sectors(top_n, consecutive_days, end_date)
+            return result
         except Exception as e:
-            logger.error(f"分析热门板块时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"分析热门板块时出错: {str(e)}")
+            logger.error(f"获取热门板块时出错: {str(e)}")
             return {'hot_sectors': []}
     
-    def predict_continuation(self, stock_code, end_date=None, gui_callback=None):
-        """预测涨停是否会延续
+    def predict_continuation(self, stock_code, end_date=None):
+        """预测涨停延续性
         
         Args:
             stock_code: 股票代码
-            end_date: 结束日期
-            gui_callback: GUI回调函数
+            end_date: 结束日期，格式 YYYY-MM-DD
             
         Returns:
             Dict: 预测结果
         """
-        if gui_callback:
-            gui_callback("状态", f"正在分析 {stock_code} 涨停延续性...")
-        
         try:
-            # 获取预测结果
-            prediction = self.tracker.predict_limit_up_continuation(stock_code, end_date)
-            
-            if prediction and 'continuation_probability' in prediction:
-                # 格式化输出
-                prob = prediction['continuation_probability']
-                level = "很高" if prob >= 80 else "高" if prob >= 60 else "中等" if prob >= 40 else "低" if prob >= 20 else "很低"
-                
-                if gui_callback:
-                    gui_callback("状态", f"{stock_code} 明日涨停概率: {prob:.2f}%，级别: {level}")
-                    gui_callback("涨停预测", prediction)
-                
-                return prediction
-            else:
-                if gui_callback:
-                    gui_callback("状态", f"{stock_code} 不符合预测条件")
-                return {'continuation_probability': 0}
-            
+            logger.info(f"请求预测股票 {stock_code} 的涨停延续性，截止日期: {end_date or '今日'}")
+            result = self.tracker.predict_limit_up_continuation(stock_code, end_date)
+            return result
         except Exception as e:
             logger.error(f"预测涨停延续性时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"预测涨停延续性时出错: {str(e)}")
             return {'continuation_probability': 0, 'error': str(e)}
     
-    def generate_comprehensive_report(self, top_n=20, end_date=None, gui_callback=None):
-        """生成综合暴涨股分析报告
+    def get_comprehensive_report(self, end_date=None):
+        """获取综合分析报告
         
         Args:
-            top_n: 每类返回的股票数量
-            end_date: 结束日期
-            gui_callback: GUI回调函数
+            end_date: 结束日期，格式 YYYY-MM-DD
             
         Returns:
-            Dict: 分析报告
-        """
-        if self.running:
-            if gui_callback:
-                gui_callback("状态", "已有分析任务在运行，请等待完成")
-            return None
-        
-        self.running = True
-        
-        if gui_callback:
-            gui_callback("状态", "开始生成暴涨股综合分析报告...")
-        
-        # 创建线程执行分析
-        def run_analysis():
-            try:
-                # 生成报告
-                report = self.tracker.generate_hot_stock_report(top_n, end_date)
-                
-                if report and 'error' not in report:
-                    # 保存结果
-                    self.last_results['comprehensive_report'] = report
-                    
-                    # 格式化市场热度
-                    market_heat = report.get('market_indicators', {}).get('market_heat', 0)
-                    heat_level = report.get('market_indicators', {}).get('heat_level', '未知')
-                    
-                    if gui_callback:
-                        gui_callback("状态", f"报告生成完成！市场热度: {market_heat:.2f}，级别: {heat_level}")
-                        gui_callback("综合报告", report)
-                else:
-                    error = report.get('error', '未知错误')
-                    if gui_callback:
-                        gui_callback("状态", f"报告生成失败: {error}")
-                
-                self.running = False
-                return report
-                
-            except Exception as e:
-                logger.error(f"生成综合报告时出错: {str(e)}")
-                if gui_callback:
-                    gui_callback("状态", f"生成综合报告时出错: {str(e)}")
-                self.running = False
-                return None
-        
-        # 启动分析线程
-        self.analysis_thread = threading.Thread(target=run_analysis)
-        self.analysis_thread.daemon = True
-        self.analysis_thread.start()
-        
-        return None  # 结果将通过回调函数返回
-    
-    def export_results(self, result_type, file_path, gui_callback=None):
-        """导出分析结果
-        
-        Args:
-            result_type: 结果类型，可选值：limit_up_1, limit_up_2, limit_up_3, potential_breakout, hot_sectors, comprehensive_report
-            file_path: 文件路径
-            gui_callback: GUI回调函数
-            
-        Returns:
-            bool: 是否导出成功
+            Dict: 综合分析报告
         """
         try:
-            # 检查结果是否存在
-            if result_type not in self.last_results:
-                if gui_callback:
-                    gui_callback("状态", f"未找到{result_type}类型的结果")
-                return False
+            logger.info(f"请求生成综合分析报告，截止日期: {end_date or '今日'}")
             
-            result = self.last_results[result_type]
+            # 获取各类数据
+            limit_up_1d = self.get_consecutive_limit_up_stocks(1, end_date)
+            limit_up_2d = self.get_consecutive_limit_up_stocks(2, end_date)
+            limit_up_3d = self.get_consecutive_limit_up_stocks(3, end_date)
             
-            # 根据结果类型和格式进行导出
-            if isinstance(result, pd.DataFrame):
-                # DataFrame导出为CSV
-                result.to_csv(file_path, index=False, encoding='utf-8-sig')
-                if gui_callback:
-                    gui_callback("状态", f"已将结果导出至 {file_path}")
-                return True
-            elif isinstance(result, dict):
-                # 字典导出为JSON
-                import json
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
-                if gui_callback:
-                    gui_callback("状态", f"已将结果导出至 {file_path}")
-                return True
+            potential_stocks = self.get_potential_breakout_stocks(70, end_date)
+            
+            hot_sectors = self.get_hot_sectors(10, 3, end_date)
+            
+            # 创建报告
+            report = {
+                'date': end_date or datetime.now().strftime('%Y-%m-%d'),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'consecutive_limit_up': {
+                    '1day': limit_up_1d.to_dict('records') if not limit_up_1d.empty else [],
+                    '2days': limit_up_2d.to_dict('records') if not limit_up_2d.empty else [],
+                    '3days': limit_up_3d.to_dict('records') if not limit_up_3d.empty else [],
+                    'summary': {
+                        'total_1day': len(limit_up_1d),
+                        'total_2days': len(limit_up_2d),
+                        'total_3days': len(limit_up_3d),
+                    }
+                },
+                'potential_breakout': {
+                    'stocks': potential_stocks.to_dict('records') if not potential_stocks.empty else [],
+                    'total': len(potential_stocks)
+                },
+                'hot_sectors': hot_sectors,
+                'market_heat': hot_sectors.get('market_heat', 50) if isinstance(hot_sectors, dict) else 50
+            }
+            
+            # 保存报告
+            self._save_report(report)
+            
+            return report
+        except Exception as e:
+            logger.error(f"生成综合分析报告时出错: {str(e)}")
+            return {
+                'date': end_date or datetime.now().strftime('%Y-%m-%d'),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'error': str(e)
+            }
+    
+    def _save_report(self, report):
+        """保存分析报告
+        
+        Args:
+            report: 分析报告字典
+        """
+        try:
+            # 创建时间戳文件名
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_path = os.path.join(self.results_dir, f'hot_stock_report_{timestamp}.json')
+            
+            # 保存为JSON
+            import json
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"热门股票分析报告已保存到 {file_path}")
+            
+        except Exception as e:
+            logger.error(f"保存热门股票分析报告时出错: {str(e)}")
+    
+    def convert_to_gui_format(self, data, data_type='limit_up'):
+        """转换数据为GUI显示格式
+        
+        Args:
+            data: 原始数据 (DataFrame或Dict)
+            data_type: 数据类型 ('limit_up', 'potential', 'sectors')
+            
+        Returns:
+            List: 适合GUI显示的数据列表
+        """
+        try:
+            if data_type == 'limit_up':
+                if isinstance(data, pd.DataFrame) and not data.empty:
+                    result = []
+                    for _, row in data.iterrows():
+                        item = {
+                            'code': row['code'],
+                            'name': row['name'] if 'name' in row else '',
+                            'industry': row['industry'] if 'industry' in row else '',
+                            'consecutive_days': str(row['consecutive_days']) if 'consecutive_days' in row else '1',
+                            'last_close': f"{row['last_close']:.2f}" if 'last_close' in row else '0.00',
+                            'change_percent': f"{row['change_percent']:.2f}%" if 'change_percent' in row else '0.00%',
+                            'volume_ratio': f"{row['volume_ratio']:.2f}" if 'volume_ratio' in row else '0.00',
+                            'last_date': row['last_date'] if 'last_date' in row else ''
+                        }
+                        result.append(item)
+                    return result
+                return []
+                
+            elif data_type == 'potential':
+                if isinstance(data, pd.DataFrame) and not data.empty:
+                    result = []
+                    for _, row in data.iterrows():
+                        item = {
+                            'code': row['code'],
+                            'name': row['name'] if 'name' in row else '',
+                            'industry': row['industry'] if 'industry' in row else '',
+                            'breakout_score': f"{row['breakout_score']:.1f}" if 'breakout_score' in row else '0.0',
+                            'close': f"{row['close']:.2f}" if 'close' in row else '0.00',
+                            'change_percent': f"{row['change_percent']:.2f}%" if 'change_percent' in row else '0.00%',
+                            'volume_ratio': f"{row['volume_ratio']:.2f}" if 'volume_ratio' in row else '0.00',
+                            'money_flow_score': f"{row['money_flow_score']:.1f}" if 'money_flow_score' in row else '0.0',
+                            'macd_signal': row['macd_signal'] if 'macd_signal' in row else ''
+                        }
+                        result.append(item)
+                    return result
+                return []
+                
+            elif data_type == 'sectors':
+                if isinstance(data, dict) and 'hot_sectors' in data:
+                    result = []
+                    for sector in data['hot_sectors']:
+                        item = {
+                            'sector': sector['sector'],
+                            'limit_up_count': str(sector['limit_up_count']) if 'limit_up_count' in sector else '0',
+                            'avg_change': f"{sector['avg_change']:.2f}%" if 'avg_change' in sector else '0.00%',
+                            'top_performer_name': sector['top_performer']['name'] if 'top_performer' in sector else '',
+                            'top_performer_code': sector['top_performer']['code'] if 'top_performer' in sector else '',
+                            'top_performer_change': f"{sector['top_performer']['change']:.2f}%" if 'top_performer' in sector else '0.00%',
+                            'score': f"{sector['score']:.1f}" if 'score' in sector else '0.0'
+                        }
+                        result.append(item)
+                    return result
+                return []
+                
             else:
-                if gui_callback:
-                    gui_callback("状态", f"不支持的结果类型: {type(result)}")
-                return False
-            
-        except Exception as e:
-            logger.error(f"导出结果时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"导出结果时出错: {str(e)}")
-            return False
-    
-    def get_market_heat_indicator(self, end_date=None, gui_callback=None):
-        """获取市场热度指标
-        
-        Args:
-            end_date: 结束日期
-            gui_callback: GUI回调函数
-            
-        Returns:
-            Dict: 市场热度指标
-        """
-        if gui_callback:
-            gui_callback("状态", "正在分析市场热度...")
-        
-        try:
-            # 获取涨停股数据
-            limit_up_1d = self.tracker.get_consecutive_limit_up_stocks(1, end_date)
-            limit_up_2d = self.tracker.get_consecutive_limit_up_stocks(2, end_date)
-            limit_up_3d = self.tracker.get_consecutive_limit_up_stocks(3, end_date)
-            
-            # 计算市场热度
-            market_heat = 0
-            
-            # 基于涨停股票数量计算热度
-            limit_up_1d_count = len(limit_up_1d) if not limit_up_1d.empty else 0
-            limit_up_2d_count = len(limit_up_2d) if not limit_up_2d.empty else 0
-            limit_up_3d_count = len(limit_up_3d) if not limit_up_3d.empty else 0
-            
-            if limit_up_1d_count > 0:
-                limit_up_ratio = min(1.0, limit_up_1d_count / 100)
-                consecutive_ratio = (limit_up_2d_count * 2 + limit_up_3d_count * 3) / 50
+                logger.warning(f"未知的数据类型: {data_type}")
+                return []
                 
-                market_heat = (limit_up_ratio * 40 + consecutive_ratio * 60) * 100
-                market_heat = min(100, max(0, market_heat))
-            
-            # 确定热度级别
-            heat_level = '火爆' if market_heat >= 80 else \
-                         '热' if market_heat >= 60 else \
-                         '温和' if market_heat >= 40 else \
-                         '冷' if market_heat >= 20 else '极冷'
-            
-            # 创建结果
-            result = {
-                'date': end_date or datetime.now().strftime('%Y-%m-%d'),
-                'market_heat': market_heat,
-                'heat_level': heat_level,
-                'limit_up_counts': {
-                    '1day': limit_up_1d_count,
-                    '2days': limit_up_2d_count,
-                    '3days': limit_up_3d_count
-                }
-            }
-            
-            if gui_callback:
-                gui_callback("状态", f"市场热度: {market_heat:.2f}，级别: {heat_level}")
-                gui_callback("市场热度", result)
-            
-            return result
-            
         except Exception as e:
-            logger.error(f"获取市场热度指标时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"获取市场热度指标时出错: {str(e)}")
-            return {
-                'date': end_date or datetime.now().strftime('%Y-%m-%d'),
-                'market_heat': 0,
-                'heat_level': '未知',
-                'error': str(e)
-            }
-    
-    def visualize_market_heat_trend(self, days=30, gui_callback=None):
-        """可视化市场热度趋势
-        
-        Args:
-            days: 分析的天数
-            gui_callback: GUI回调函数
-            
-        Returns:
-            Dict: 市场热度趋势数据
-        """
-        if gui_callback:
-            gui_callback("状态", f"正在分析近{days}天市场热度趋势...")
-        
-        try:
-            # 获取日期序列
-            end_date = datetime.now()
-            date_list = [(end_date - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days)]
-            date_list.reverse()  # 按时间升序排列
-            
-            # 收集每日热度
-            heat_trend = []
-            
-            for date in date_list:
-                # 获取当日市场热度
-                heat_data = self.get_market_heat_indicator(date)
-                
-                heat_trend.append({
-                    'date': date,
-                    'market_heat': heat_data['market_heat'],
-                    'heat_level': heat_data['heat_level'],
-                    'limit_up_1d': heat_data['limit_up_counts']['1day'],
-                    'limit_up_2d': heat_data['limit_up_counts']['2days'],
-                    'limit_up_3d': heat_data['limit_up_counts']['3days']
-                })
-            
-            # 创建结果
-            result = {
-                'start_date': date_list[0],
-                'end_date': date_list[-1],
-                'days': days,
-                'trend_data': heat_trend
-            }
-            
-            if gui_callback:
-                gui_callback("状态", f"市场热度趋势分析完成，共{days}天数据")
-                gui_callback("热度趋势", result)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"分析市场热度趋势时出错: {str(e)}")
-            if gui_callback:
-                gui_callback("状态", f"分析市场热度趋势时出错: {str(e)}")
-            return {
-                'error': str(e)
-            } 
+            logger.error(f"转换GUI格式时出错: {str(e)}")
+            return [] 
