@@ -25,6 +25,127 @@ from src.enhanced.data.fetchers.joinquant_fetcher import EnhancedJoinQuantFetche
 # 设置日志
 logger = logging.getLogger(__name__)
 
+# 独立的缓存装饰器函数
+def with_cache(method_name: str):
+    """
+    装饰器: 为方法添加缓存功能
+    
+    Args:
+        method_name: 方法名
+        
+    Returns:
+        callable: 装饰后的方法
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if not self.cache_enabled:
+                return func(self, *args, **kwargs)
+                
+            # 从关键字参数中提取强制刷新标志
+            force_refresh = kwargs.pop('force_refresh', False)
+            
+            # 生成缓存键
+            cache_key = self._get_cache_key(method_name, *args, **kwargs)
+            
+            # 如果不需要强制刷新，尝试从缓存获取
+            if not force_refresh:
+                cached_data = self._get_from_cache(cache_key)
+                if cached_data is not None:
+                    return cached_data
+            
+            # 执行原始方法
+            result = func(self, *args, **kwargs)
+            
+            # 如果有结果，保存到缓存
+            if result is not None:
+                self._save_to_cache(cache_key, result)
+                
+            return result
+        return wrapper
+    return decorator
+
+# 独立的故障转移装饰器函数
+def with_failover(method_name: str):
+    """
+    装饰器: 为方法添加故障转移逻辑
+    
+    Args:
+        method_name: 数据源的方法名
+        
+    Returns:
+        callable: 装饰后的方法
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            # 从关键字参数中提取首选数据源
+            preferred_sources = kwargs.pop('preferred_sources', None)
+            
+            # 记录遇到的异常
+            exceptions = {}
+            
+            # 如果提供了首选数据源，先尝试它们
+            if preferred_sources:
+                for source_name in preferred_sources:
+                    if not self.health_check(source_name):
+                        logger.debug(f"跳过不健康的首选数据源: {source_name}")
+                        continue
+                    
+                    data_source = self.data_sources[source_name]
+                    try:
+                        logger.debug(f"尝试使用首选数据源 {source_name} 的 {method_name} 方法")
+                        method = getattr(data_source, method_name)
+                        return method(*args[1:], **kwargs)
+                    except Exception as e:
+                        exceptions[source_name] = str(e)
+                        logger.warning(f"使用数据源 {source_name} 失败: {str(e)}")
+                        # 标记为不健康
+                        self.health_status[source_name] = False
+            
+            # 尝试主数据源(如果它不在首选数据源中)
+            if self.primary_source and (not preferred_sources or self.primary_source not in preferred_sources):
+                if self.health_check(self.primary_source):
+                    try:
+                        logger.debug(f"尝试使用主数据源 {self.primary_source} 的 {method_name} 方法")
+                        method = getattr(self.data_sources[self.primary_source], method_name)
+                        return method(*args[1:], **kwargs)
+                    except Exception as e:
+                        exceptions[self.primary_source] = str(e)
+                        logger.warning(f"使用主数据源 {self.primary_source} 失败: {str(e)}")
+                        # 标记为不健康
+                        self.health_status[self.primary_source] = False
+            
+            # 尝试其他健康的数据源
+            for source_name, data_source in self.data_sources.items():
+                # 跳过已尝试过的
+                if (preferred_sources and source_name in preferred_sources) or source_name == self.primary_source:
+                    continue
+                
+                if not self.health_check(source_name):
+                    logger.debug(f"跳过不健康的数据源: {source_name}")
+                    continue
+                
+                try:
+                    logger.debug(f"尝试使用备用数据源 {source_name} 的 {method_name} 方法")
+                    method = getattr(data_source, method_name)
+                    return method(*args[1:], **kwargs)
+                except Exception as e:
+                    exceptions[source_name] = str(e)
+                    logger.warning(f"使用数据源 {source_name} 失败: {str(e)}")
+                    # 标记为不健康
+                    self.health_status[source_name] = False
+            
+            # 所有数据源都失败了
+            logger.error(f"所有数据源的 {method_name} 方法都失败了")
+            for source_name, error in exceptions.items():
+                logger.error(f"  - {source_name}: {error}")
+            
+            return None
+        
+        return wrapper
+    return decorator
+
 class DataSourceManager:
     """
     数据源管理器
@@ -221,89 +342,6 @@ class DataSourceManager:
                 return source_name
         
         return None
-    
-    def with_failover(self, method_name: str):
-        """
-        装饰器: 为方法添加故障转移逻辑
-        
-        Args:
-            method_name: 数据源的方法名
-            
-        Returns:
-            callable: 装饰后的方法
-        """
-        def decorator(func):
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                # 确保第一个参数是self
-                instance = args[0]
-                
-                # 从关键字参数中提取首选数据源
-                preferred_sources = kwargs.pop('preferred_sources', None)
-                
-                # 记录遇到的异常
-                exceptions = {}
-                
-                # 如果提供了首选数据源，先尝试它们
-                if preferred_sources:
-                    for source_name in preferred_sources:
-                        if not instance.health_check(source_name):
-                            logger.debug(f"跳过不健康的首选数据源: {source_name}")
-                            continue
-                        
-                        data_source = instance.data_sources[source_name]
-                        try:
-                            logger.debug(f"尝试使用首选数据源 {source_name} 的 {method_name} 方法")
-                            method = getattr(data_source, method_name)
-                            return method(*args[1:], **kwargs)
-                        except Exception as e:
-                            exceptions[source_name] = str(e)
-                            logger.warning(f"使用数据源 {source_name} 失败: {str(e)}")
-                            # 标记为不健康
-                            instance.health_status[source_name] = False
-                
-                # 尝试主数据源(如果它不在首选数据源中)
-                if instance.primary_source and (not preferred_sources or instance.primary_source not in preferred_sources):
-                    if instance.health_check(instance.primary_source):
-                        try:
-                            logger.debug(f"尝试使用主数据源 {instance.primary_source} 的 {method_name} 方法")
-                            method = getattr(instance.data_sources[instance.primary_source], method_name)
-                            return method(*args[1:], **kwargs)
-                        except Exception as e:
-                            exceptions[instance.primary_source] = str(e)
-                            logger.warning(f"使用主数据源 {instance.primary_source} 失败: {str(e)}")
-                            # 标记为不健康
-                            instance.health_status[instance.primary_source] = False
-                
-                # 尝试其他健康的数据源
-                for source_name, data_source in instance.data_sources.items():
-                    # 跳过已尝试过的
-                    if (preferred_sources and source_name in preferred_sources) or source_name == instance.primary_source:
-                        continue
-                    
-                    if not instance.health_check(source_name):
-                        logger.debug(f"跳过不健康的数据源: {source_name}")
-                        continue
-                    
-                    try:
-                        logger.debug(f"尝试使用备用数据源 {source_name} 的 {method_name} 方法")
-                        method = getattr(data_source, method_name)
-                        return method(*args[1:], **kwargs)
-                    except Exception as e:
-                        exceptions[source_name] = str(e)
-                        logger.warning(f"使用数据源 {source_name} 失败: {str(e)}")
-                        # 标记为不健康
-                        instance.health_status[source_name] = False
-                
-                # 所有数据源都失败了
-                logger.error(f"所有数据源的 {method_name} 方法都失败了")
-                for source_name, error in exceptions.items():
-                    logger.error(f"  - {source_name}: {error}")
-                
-                return None
-            
-            return wrapper
-        return decorator
     
     @property
     def available_sources(self) -> List[str]:
@@ -762,6 +800,8 @@ class DataSourceManager:
             logger.error(f"获取 {trade_date} 的所有股票行情数据失败: {str(e)}")
             return None
             
+    @with_cache(method_name="get_market_overview")
+    @with_failover(method_name="get_market_overview")
     def get_market_overview(self, trade_date: str = None) -> Dict[str, Any]:
         """
         获取市场概览数据
@@ -810,6 +850,7 @@ class DataSourceManager:
                 'limit_down_count': len(limit_down_stocks),
                 'limit_up_stocks': limit_up_stocks[:10],  # 只返回前10只
                 'limit_down_stocks': limit_down_stocks[:10],  # 只返回前10只
+                'turnover_rate': total_volume / total_amount * 100 if total_amount > 0 else 0,
             }
             
             logger.debug(f"成功获取 {trade_date} 的市场概览数据")
@@ -817,7 +858,8 @@ class DataSourceManager:
             
         except Exception as e:
             logger.error(f"获取市场概览数据失败: {str(e)}")
-            return {}    
+            return {}
+        
     # 缓存相关方法
     
     def _get_cache_key(self, method_name: str, *args, **kwargs) -> str:
@@ -980,45 +1022,6 @@ class DataSourceManager:
                 del self.memory_cache_expires[key]
                 logger.debug(f"删除内存缓存项，键={key}，新大小={self.current_memory_cache_size / 1024 / 1024:.2f}MB")
                 
-    def with_cache(self, method_name: str):
-        """
-        装饰器: 为方法添加缓存功能
-        
-        Args:
-            method_name: 方法名
-            
-        Returns:
-            callable: 装饰后的方法
-        """
-        def decorator(func):
-            @wraps(func)
-            def wrapper(self, *args, **kwargs):
-                if not self.cache_enabled:
-                    return func(self, *args, **kwargs)
-                    
-                # 从关键字参数中提取强制刷新标志
-                force_refresh = kwargs.pop('force_refresh', False)
-                
-                # 生成缓存键
-                cache_key = self._get_cache_key(method_name, *args, **kwargs)
-                
-                # 如果不需要强制刷新，尝试从缓存获取
-                if not force_refresh:
-                    cached_data = self._get_from_cache(cache_key)
-                    if cached_data is not None:
-                        return cached_data
-                
-                # 执行原始方法
-                result = func(self, *args, **kwargs)
-                
-                # 如果有结果，保存到缓存
-                if result is not None:
-                    self._save_to_cache(cache_key, result)
-                    
-                return result
-            return wrapper
-        return decorator
-    
     # 工具方法
     
     @with_cache(method_name='get_trading_dates')

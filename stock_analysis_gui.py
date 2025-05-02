@@ -511,6 +511,13 @@ class StockAnalysisGUI:
         # 刷新按钮
         ttk.Button(control_frame, text="刷新市场数据", command=self.refresh_market_overview).pack(side=tk.LEFT, padx=5)
         
+        # 市场情绪显示
+        self.market_sentiment_frame = ttk.LabelFrame(control_frame, text="市场情绪")
+        self.market_sentiment_frame.pack(side=tk.RIGHT, padx=5, fill=tk.X)
+        
+        self.sentiment_label = ttk.Label(self.market_sentiment_frame, text="--", font=("Arial", 10, "bold"))
+        self.sentiment_label.pack(side=tk.LEFT, padx=10, pady=5)
+        
         # 创建分隔线
         ttk.Separator(frame, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=5, pady=5)
         
@@ -522,14 +529,14 @@ class StockAnalysisGUI:
         index_frame = ttk.LabelFrame(content_frame, text="市场指数")
         index_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # 创建指数表格
-        columns = ("指数名称", "最新价", "涨跌幅", "成交量", "成交额")
+        # 创建指数表格 - 添加5日涨跌幅和趋势列
+        columns = ("指数名称", "最新价", "涨跌幅", "5日涨跌", "趋势", "成交量", "成交额")
         self.index_tree = ttk.Treeview(index_frame, columns=columns, show="headings", height=10)
         
         # 设置列标题
         for col in columns:
             self.index_tree.heading(col, text=col)
-            self.index_tree.column(col, width=100)
+            self.index_tree.column(col, width=80)
         
         # 添加滚动条
         index_scrollbar = ttk.Scrollbar(index_frame, orient=tk.VERTICAL, command=self.index_tree.yview)
@@ -543,8 +550,8 @@ class StockAnalysisGUI:
         sector_frame = ttk.LabelFrame(content_frame, text="行业板块")
         sector_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # 创建行业板块表格
-        columns = ("行业名称", "平均涨跌幅", "领涨股", "领涨股涨幅", "领跌股", "领跌股跌幅")
+        # 创建行业板块表格 - 添加强度指数和修改列布局
+        columns = ("行业名称", "强度指数", "平均涨跌幅", "上涨家数", "下跌家数", "领涨股", "领涨股涨幅")
         self.sector_tree = ttk.Treeview(sector_frame, columns=columns, show="headings", height=10)
         
         # 设置列标题
@@ -552,12 +559,13 @@ class StockAnalysisGUI:
             self.sector_tree.heading(col, text=col)
         
         # 设置列宽
-        self.sector_tree.column("行业名称", width=100)
+        self.sector_tree.column("行业名称", width=90)
+        self.sector_tree.column("强度指数", width=70)
         self.sector_tree.column("平均涨跌幅", width=80)
-        self.sector_tree.column("领涨股", width=100)
+        self.sector_tree.column("上涨家数", width=70)
+        self.sector_tree.column("下跌家数", width=70)
+        self.sector_tree.column("领涨股", width=90)
         self.sector_tree.column("领涨股涨幅", width=80)
-        self.sector_tree.column("领跌股", width=100)
-        self.sector_tree.column("领跌股跌幅", width=80)
         
         # 添加滚动条
         sector_scrollbar = ttk.Scrollbar(sector_frame, orient=tk.VERTICAL, command=self.sector_tree.yview)
@@ -592,8 +600,8 @@ class StockAnalysisGUI:
         self.current_hot_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         current_hot_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # 未来热门板块预测区域
-        future_hot_frame = ttk.LabelFrame(hot_frames_container, text="未来热门板块预测")
+        # 未来热门板块预测区域 - 更改名称
+        future_hot_frame = ttk.LabelFrame(hot_frames_container, text="未来热门板块AI预测")
         future_hot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # 创建未来热门板块表格
@@ -603,7 +611,14 @@ class StockAnalysisGUI:
         # 设置列标题
         for col in columns:
             self.future_hot_tree.heading(col, text=col)
-            self.future_hot_tree.column(col, width=80)
+            
+        # 设置列宽
+        self.future_hot_tree.column("板块名称", width=80)
+        self.future_hot_tree.column("预测涨幅", width=70)
+        self.future_hot_tree.column("关注指数", width=70)
+        self.future_hot_tree.column("主力资金", width=70)
+        self.future_hot_tree.column("成长性", width=70)
+        self.future_hot_tree.column("推荐理由", width=200)
             
         # 添加滚动条
         future_hot_scrollbar = ttk.Scrollbar(future_hot_frame, orient=tk.VERTICAL, command=self.future_hot_tree.yview)
@@ -641,8 +656,13 @@ class StockAnalysisGUI:
             label.grid(row=row, column=col*2+1, sticky=tk.W, padx=5, pady=5)
             setattr(self, var_name, label)
         
-        # 更新时间标签
-        ttk.Label(stats_frame, text="最后更新: --").pack(side=tk.RIGHT, padx=5, pady=2)
+        # 更新时间和数据来源
+        update_frame = ttk.Frame(stats_frame)
+        update_frame.pack(side=tk.RIGHT, padx=5, pady=2)
+        
+        self.last_update_label = ttk.Label(update_frame, text="最后更新: --")
+        self.last_update_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Label(update_frame, text="数据来源: 实时行情API").pack(side=tk.RIGHT, padx=5)
     
     def setup_log_tab(self):
         """设置日志选项卡"""
@@ -1667,6 +1687,27 @@ class StockAnalysisGUI:
             return
         
         try:
+            # 更新市场情绪
+            if "market_stats" in overview_data and "market_sentiment" in overview_data["market_stats"]:
+                sentiment = overview_data["market_stats"]["market_sentiment"]
+                self.sentiment_label.config(text=sentiment)
+                
+                # 根据情绪设置不同的颜色
+                if "极度乐观" in sentiment:
+                    self.sentiment_label.config(foreground="red", font=("Arial", 10, "bold"))
+                elif "乐观" in sentiment:
+                    self.sentiment_label.config(foreground="#FF4500", font=("Arial", 10, "bold"))  # 橙红色
+                elif "偏乐观" in sentiment:
+                    self.sentiment_label.config(foreground="#FF8C00", font=("Arial", 10, "bold"))  # 深橙色
+                elif "极度悲观" in sentiment:
+                    self.sentiment_label.config(foreground="green", font=("Arial", 10, "bold"))
+                elif "悲观" in sentiment:
+                    self.sentiment_label.config(foreground="#006400", font=("Arial", 10, "bold"))  # 深绿色
+                elif "偏悲观" in sentiment:
+                    self.sentiment_label.config(foreground="#228B22", font=("Arial", 10, "bold"))  # 森林绿
+                else:
+                    self.sentiment_label.config(foreground="black", font=("Arial", 10, "bold"))
+            
             # 更新指数表格
             if "indices" in overview_data:
                 # 清空表格
@@ -1679,14 +1720,31 @@ class StockAnalysisGUI:
                     if index.get('change', 0) > 0:
                         change_str = f"+{change_str}"
                     
+                    change_5d_str = f"{index.get('change_5d', 0):.2f}%"
+                    if index.get('change_5d', 0) > 0:
+                        change_5d_str = f"+{change_5d_str}"
+                    
                     values = (
                         index.get('name', ''),
                         f"{index.get('close', 0):.2f}",
                         change_str,
+                        change_5d_str,
+                        index.get('trend', '中性'),
                         f"{index.get('volume', 0)/10000:.0f}万",
                         f"{index.get('amount', 0)/100000000:.2f}亿"
                     )
-                    self.index_tree.insert("", tk.END, values=values)
+                    
+                    item_id = self.index_tree.insert("", tk.END, values=values)
+                    
+                    # 为涨跌幅设置颜色
+                    if index.get('change', 0) > 0:
+                        self.index_tree.item(item_id, tags=('up',))
+                    elif index.get('change', 0) < 0:
+                        self.index_tree.item(item_id, tags=('down',))
+                    
+                # 设置颜色
+                self.index_tree.tag_configure('up', foreground='red')
+                self.index_tree.tag_configure('down', foreground='green')
             
             # 更新行业板块表格
             if "industry_performance" in overview_data:
@@ -1704,21 +1762,28 @@ class StockAnalysisGUI:
                     leading_up_change_str = f"{leading_up_change:.2f}%"
                     if leading_up_change > 0:
                         leading_up_change_str = f"+{leading_up_change_str}"
-                        
-                    leading_down_change = industry.get('leading_down_change', 0)
-                    leading_down_change_str = f"{leading_down_change:.2f}%"
-                    if leading_down_change > 0:
-                        leading_down_change_str = f"+{leading_down_change_str}"
                     
                     values = (
                         industry.get('name', ''),
+                        f"{industry.get('strength_index', 0):.0f}",
                         change_str,
+                        industry.get('up_count', 0),
+                        industry.get('down_count', 0),
                         industry.get('leading_up', ''),
-                        leading_up_change_str,
-                        industry.get('leading_down', ''),
-                        leading_down_change_str
+                        leading_up_change_str
                     )
-                    self.sector_tree.insert("", tk.END, values=values)
+                    
+                    item_id = self.sector_tree.insert("", tk.END, values=values)
+                    
+                    # 为涨跌幅设置颜色
+                    if industry.get('change', 0) > 0:
+                        self.sector_tree.item(item_id, tags=('up',))
+                    elif industry.get('change', 0) < 0:
+                        self.sector_tree.item(item_id, tags=('down',))
+                
+                # 设置颜色
+                self.sector_tree.tag_configure('up', foreground='red')
+                self.sector_tree.tag_configure('down', foreground='green')
             
             # 更新当前热门板块表格
             if "hot_sectors" in overview_data:
@@ -1740,7 +1805,18 @@ class StockAnalysisGUI:
                         str(sector.get('down_count', 0)),
                         sector.get('leading_stock', '')
                     )
-                    self.current_hot_tree.insert("", tk.END, values=values)
+                    
+                    item_id = self.current_hot_tree.insert("", tk.END, values=values)
+                    
+                    # 为涨跌幅设置颜色
+                    if sector.get('change', 0) > 0:
+                        self.current_hot_tree.item(item_id, tags=('up',))
+                    elif sector.get('change', 0) < 0:
+                        self.current_hot_tree.item(item_id, tags=('down',))
+                
+                # 设置颜色
+                self.current_hot_tree.tag_configure('up', foreground='red')
+                self.current_hot_tree.tag_configure('down', foreground='green')
             
             # 更新未来热门板块预测表格
             if "future_hot_sectors" in overview_data:
@@ -1769,11 +1845,11 @@ class StockAnalysisGUI:
                 stats = overview_data["market_stats"]
                 # 上涨家数
                 if hasattr(self, "上涨数量标签"):
-                    self.上涨数量标签.config(text=f"{stats.get('up_count', 0)}")
+                    self.上涨数量标签.config(text=f"{stats.get('up_count', 0)}", foreground="red")
                 
                 # 下跌家数
                 if hasattr(self, "下跌数量标签"):
-                    self.下跌数量标签.config(text=f"{stats.get('down_count', 0)}")
+                    self.下跌数量标签.config(text=f"{stats.get('down_count', 0)}", foreground="green")
                     
                 # 平盘家数
                 if hasattr(self, "平盘数量标签"):
@@ -1781,11 +1857,11 @@ class StockAnalysisGUI:
                     
                 # 涨停家数
                 if hasattr(self, "涨停数量标签"):
-                    self.涨停数量标签.config(text=f"{stats.get('limit_up_count', 0)}")
+                    self.涨停数量标签.config(text=f"{stats.get('limit_up_count', 0)}", foreground="red")
                     
                 # 跌停家数
                 if hasattr(self, "跌停数量标签"):
-                    self.跌停数量标签.config(text=f"{stats.get('limit_down_count', 0)}")
+                    self.跌停数量标签.config(text=f"{stats.get('limit_down_count', 0)}", foreground="green")
                     
                 # 换手率
                 if hasattr(self, "换手率标签") and "turnover_rate" in stats:
@@ -1794,6 +1870,10 @@ class StockAnalysisGUI:
                 # 总成交额
                 if hasattr(self, "成交额标签") and "total_turnover" in stats:
                     self.成交额标签.config(text=f"{stats.get('total_turnover', 0)/100000000:.2f}亿")
+            
+            # 更新最后更新时间
+            if hasattr(self, "last_update_label") and "date" in overview_data:
+                self.last_update_label.config(text=f"最后更新: {overview_data.get('date', '')}")
         
         except Exception as e:
             logger.error(f"更新市场概览UI失败: {str(e)}", exc_info=True)
