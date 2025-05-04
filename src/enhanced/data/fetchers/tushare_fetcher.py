@@ -75,6 +75,27 @@ class EnhancedTushareFetcher:
         if time_since_last_request < self.request_interval:
             time.sleep(self.request_interval - time_since_last_request)
         
+        # 确保一些特定接口的参数按照中国股市规则设置
+        if api_name == 'trade_cal':
+            # 交易日历API
+            if 'exchange' not in kwargs:
+                # 在中国市场，默认使用上交所交易日历（与深交所一致）
+                kwargs['exchange'] = 'SSE'
+        elif api_name == 'index_daily':
+            # 指数日线数据
+            # 确保ts_code格式正确
+            if 'ts_code' in kwargs:
+                ts_code = kwargs['ts_code']
+                # 检查是否包含交易所后缀
+                if '.' not in ts_code:
+                    # 常见指数代码的交易所映射
+                    if ts_code.startswith('0'):
+                        kwargs['ts_code'] = f"{ts_code}.SH"  # 上证指数
+                    elif ts_code.startswith('3'):
+                        kwargs['ts_code'] = f"{ts_code}.SZ"  # 深证指数
+                    else:
+                        logger.warning(f"无法确定指数 {ts_code} 的交易所，使用原始代码")
+        
         # 执行API调用，带有重试
         for attempt in range(self.connection_retries):
             try:
@@ -100,17 +121,40 @@ class EnhancedTushareFetcher:
     
     def check_health(self) -> bool:
         """
-        检查API健康状态
+        检查API健康状态，使用中国股市相关接口
         
         Returns:
             bool: API是否健康
         """
         try:
-            # 尝试获取交易日历作为健康检查
+            # 获取最近一个月的交易日历作为健康检查
             today = datetime.now().strftime('%Y%m%d')
             last_month = (datetime.now() - timedelta(days=30)).strftime('%Y%m%d')
-            data = self._execute_api_call('trade_cal', start_date=last_month, end_date=today)
-            return data is not None and not data.empty
+            
+            # 尝试获取上交所交易日历
+            trade_cal_data = self._execute_api_call('trade_cal', 
+                                                    exchange='SSE', 
+                                                    start_date=last_month, 
+                                                    end_date=today)
+            
+            if trade_cal_data is None or trade_cal_data.empty:
+                logger.error("无法获取交易日历数据")
+                return False
+            
+            # 额外检查：尝试获取上证指数最近的数据
+            index_data = self._execute_api_call('index_daily',
+                                               ts_code='000001.SH',  # 上证指数
+                                               start_date=last_month,
+                                               end_date=today,
+                                               limit=1)  # 只需要一条数据来验证
+                                          
+            if index_data is None or index_data.empty:
+                logger.warning("无法获取上证指数数据，API可能部分功能不可用")
+                # 仅获取日历成功也算健康，但有警告
+                return True
+            
+            logger.info("TuShare API健康检查通过，可以正常获取中国股市数据")
+            return True
         except Exception as e:
             logger.error(f"TuShare健康检查失败: {str(e)}")
             return False
@@ -351,4 +395,63 @@ class EnhancedTushareFetcher:
             
         except Exception as e:
             logger.error(f"获取连续涨停股票失败: {str(e)}")
+            return None
+    
+    def get_stock_index_data(self, index_code: str, start_date: str, end_date: str = None) -> Optional[pd.DataFrame]:
+        """
+        获取指数日线数据
+        
+        Args:
+            index_code: 指数代码，如 000001.SH(上证指数)、399001.SZ(深证成指)
+            start_date: 开始日期，格式 YYYY-MM-DD
+            end_date: 结束日期，格式 YYYY-MM-DD，默认为今天
+            
+        Returns:
+            Optional[pd.DataFrame]: 指数日线数据
+        """
+        try:
+            # 转换日期格式
+            start_date_fmt = start_date.replace('-', '')
+            end_date_fmt = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
+            
+            logger.info(f"正在获取指数 {index_code} 的日线数据，日期范围：{start_date_fmt} 至 {end_date_fmt}")
+            
+            # 确保指数代码格式正确
+            if '.' not in index_code:
+                # 标准化指数代码
+                if index_code.startswith('0'):
+                    index_code = f"{index_code}.SH"  # 上证系列指数
+                elif index_code.startswith('399') or index_code.startswith('3'):
+                    index_code = f"{index_code}.SZ"  # 深证系列指数
+                elif index_code.startswith('8'):
+                    index_code = f"{index_code}.CSI"  # 中证指数
+                else:
+                    logger.warning(f"未能识别的指数代码格式: {index_code}，尝试直接使用")
+            
+            # 获取指数日线数据，确保API参数正确
+            data = self._execute_api_call('index_daily', 
+                                         ts_code=index_code,
+                                         start_date=start_date_fmt,
+                                         end_date=end_date_fmt)
+            
+            # 检查数据有效性
+            if data is None:
+                logger.error(f"无法获取指数 {index_code} 的日线数据")
+                return None
+            
+            if data.empty:
+                logger.warning(f"获取到的指数 {index_code} 日线数据为空")
+                return pd.DataFrame()
+            
+            # 转换日期列格式
+            if 'trade_date' in data.columns:
+                data['date'] = pd.to_datetime(data['trade_date']).dt.strftime('%Y-%m-%d')
+            
+            # 确保结果按日期排序
+            data = data.sort_values('date') if 'date' in data.columns else data
+            
+            logger.info(f"成功获取指数 {index_code} 的日线数据，共 {len(data)} 条记录")
+            return data
+        except Exception as e:
+            logger.error(f"获取指数 {index_code} 日线数据失败: {str(e)}")
             return None 

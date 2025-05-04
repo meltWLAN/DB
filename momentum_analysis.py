@@ -6,12 +6,15 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as pl
+import matplotlib.pyplot as plt
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 import tushare as ts
 import warnings
+from concurrent.futures import ProcessPoolExecutor
+import functools
+from joblib import Memory
 warnings.filterwarnings('ignore')
 # 确保当前目录在Python路径中
 current_dir = Path(__file__).parent
@@ -42,15 +45,22 @@ if TUSHARE_TOKEN:
     pro = ts.pro_api()
 else:
     pro = None
+# 设置缓存目录
+CACHE_DIR = "./cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+# 创建缓存对象
+memory = Memory(CACHE_DIR, verbose=0)
 class MomentumAnalyzer:
     """动量分析器类，提供动量分析相关功能"""
-    def __init__(self, use_tushare=True):
+    def __init__(self, use_tushare=True, use_multiprocessing=True, max_workers=None):
         """初始化动量分析器"""
         self.use_tushare = use_tushare
         if use_tushare and not TUSHARE_TOKEN:
             logger.warning("未设置Tushare Token，将使用本地数据")
             self.use_tushare = False
         self.data_cache = {}  # 数据缓存
+        self.use_multiprocessing = use_multiprocessing
+        self.max_workers = max_workers
     def get_stock_list(self, industry=None):
         """获取股票列表，可按行业筛选"""
         # 热门板块和对应的关键词映射
@@ -174,18 +184,11 @@ class MomentumAnalyzer:
         except Exception as e:
             logger.error(f"从本地获取股票列表失败: {str(e)}")
             return pd.DataFrame(columns=['ts_code', 'symbol', 'name', 'area', 'industry', 'list_date'])
-    def get_stock_daily_data(self, ts_code, start_date=None, end_date=None):
-        """获取股票日线数据"""
-        # 设置默认日期
-        if not end_date:
-            end_date = datetime.now().strftime('%Y%m%d')
-        if not start_date:
-            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
-        # 检查缓存
-        cache_key = f"{ts_code}_{start_date}_{end_date}"
-        if cache_key in self.data_cache:
-            return self.data_cache[cache_key]
-        if self.use_tushare:
+    # 使用joblib缓存get_stock_daily_data方法
+    @memory.cache
+    def _cached_get_stock_data(self, ts_code, start_date, end_date, use_tushare):
+        """缓存版本的数据获取方法"""
+        if use_tushare:
             try:
                 # 从Tushare获取日线数据
                 df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
@@ -198,8 +201,6 @@ class MomentumAnalyzer:
                         df['trade_date'] = pd.to_datetime(df['trade_date'])
                         df.sort_values('trade_date', inplace=True)
                         df.set_index('trade_date', inplace=True)
-                    # 缓存数据
-                    self.data_cache[cache_key] = df
                     return df
                 else:
                     logger.warning(f"获取{ts_code}的日线数据为空")
@@ -209,6 +210,26 @@ class MomentumAnalyzer:
                 return self._get_local_stock_data(ts_code, start_date, end_date)
         else:
             return self._get_local_stock_data(ts_code, start_date, end_date)
+            
+    def get_stock_daily_data(self, ts_code, start_date=None, end_date=None):
+        """获取股票日线数据"""
+        # 设置默认日期
+        if not end_date:
+            end_date = datetime.now().strftime('%Y%m%d')
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+            
+        # 检查内存缓存
+        cache_key = f"{ts_code}_{start_date}_{end_date}"
+        if cache_key in self.data_cache:
+            return self.data_cache[cache_key]
+            
+        # 使用磁盘缓存
+        df = self._cached_get_stock_data(ts_code, start_date, end_date, self.use_tushare)
+        
+        # 将结果存入内存缓存
+        self.data_cache[cache_key] = df
+        return df
     def _get_local_stock_data(self, ts_code, start_date=None, end_date=None):
         """从本地获取股票日线数据（备用方法）"""
         try:
@@ -465,6 +486,61 @@ class MomentumAnalyzer:
         else:
             plt.show()
             return True
+    # 优化分析单个股票的函数，用于多进程
+    def _analyze_single_stock(self, stock_info):
+        """分析单个股票，用于并行处理"""
+        ts_code = stock_info['ts_code']
+        name = stock_info['name']
+        industry = stock_info.get('industry', '')
+        
+        try:
+            # 获取日线数据
+            data = self.get_stock_daily_data(ts_code)
+            if data.empty:
+                logger.warning(f"无法获取{ts_code}的数据，跳过分析")
+                return None
+                
+            # 计算技术指标
+            data = self.calculate_momentum(data)
+            if data.empty:
+                logger.warning(f"计算{ts_code}的技术指标失败，跳过分析")
+                return None
+                
+            # 计算动量得分
+            score, score_details = self.calculate_momentum_score(data)
+            
+            # 符合条件才返回结果
+            if score >= self.min_score_threshold:
+                # 获取最新数据
+                latest = data.iloc[-1]
+                
+                # 保存分析结果
+                result = {
+                    'ts_code': ts_code,
+                    'name': name,
+                    'industry': industry,
+                    'close': latest['close'],
+                    'momentum_20': latest.get('momentum_20', 0),
+                    'momentum_20d': latest.get('momentum_20', 0),  # 为兼容GUI，添加此字段
+                    'rsi': latest.get('rsi', 0),
+                    'macd': latest.get('macd', 0),
+                    'macd_hist': latest.get('macd_hist', 0),  # 为兼容GUI，添加此字段
+                    'volume_ratio': latest.get('vol_ratio_20', 1),
+                    'score': score,
+                    'score_details': score_details,
+                    'data': data
+                }
+                
+                # 生成图表
+                chart_path = os.path.join(RESULTS_DIR, "charts", f"{ts_code}_momentum.png")
+                self.plot_stock_chart(data, ts_code, name, score_details, save_path=chart_path)
+                
+                return result
+        except Exception as e:
+            logger.error(f"分析{name}({ts_code})时出错: {str(e)}")
+            
+        return None
+        
     def analyze_stocks(self, stock_list, sample_size=100, min_score=60):
         """分析股票列表，找出具有强劲动量的股票"""
         results = []
@@ -488,50 +564,35 @@ class MomentumAnalyzer:
         total = len(stock_list)
         logger.info(f"开始分析 {total} 支股票")
         
-        for idx, (_, stock) in enumerate(stock_list.iterrows()):
-            try:
-                ts_code = stock['ts_code']
-                name = stock['name']
-                industry = stock.get('industry', '')
-                logger.info(f"分析进度: {idx+1}/{total} - 正在分析: {name}({ts_code})")
-                # 获取日线数据
-                data = self.get_stock_daily_data(ts_code)
-                if data.empty:
-                    logger.warning(f"无法获取{ts_code}的数据，跳过分析")
-                    continue
-                # 计算技术指标
-                data = self.calculate_momentum(data)
-                if data.empty:
-                    logger.warning(f"计算{ts_code}的技术指标失败，跳过分析")
-                    continue
-                # 计算动量得分
-                score, score_details = self.calculate_momentum_score(data)
-                if score >= min_score:
-                    # 获取最新数据
-                    latest = data.iloc[-1]
-                    # 保存分析结果
-                    result = {
-                        'ts_code': ts_code,
-                        'name': name,
-                        'industry': industry,
-                        'close': latest['close'],
-                        'momentum_20': latest.get('momentum_20', 0),
-                        'momentum_20d': latest.get('momentum_20', 0),  # 为兼容GUI，添加此字段
-                        'rsi': latest.get('rsi', 0),
-                        'macd': latest.get('macd', 0),
-                        'macd_hist': latest.get('macd_hist', 0),  # 为兼容GUI，添加此字段
-                        'volume_ratio': latest.get('vol_ratio_20', 1),
-                        'score': score,
-                        'score_details': score_details,
-                        'data': data
-                    }
+        # 存储最小分数阈值，用于并行处理
+        self.min_score_threshold = min_score
+        
+        # 并行处理版本
+        if self.use_multiprocessing:
+            # 转为列表，便于并行处理
+            stocks_to_analyze = [stock for _, stock in stock_list.iterrows()]
+            
+            # 使用多进程池
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                # 并行分析所有股票
+                futures = [executor.submit(self._analyze_single_stock, stock) for stock in stocks_to_analyze]
+                
+                # 收集结果
+                for i, future in enumerate(futures):
+                    if i % 10 == 0:  # 每处理10只股票显示一次进度
+                        logger.info(f"分析进度: {i+1}/{total}")
+                    
+                    result = future.result()
+                    if result is not None:
+                        results.append(result)
+        
+        # 串行处理版本
+        else:
+            for idx, (_, stock) in enumerate(stock_list.iterrows()):
+                logger.info(f"分析进度: {idx+1}/{total} - 正在分析: {stock['name']}({stock['ts_code']})")
+                result = self._analyze_single_stock(stock)
+                if result is not None:
                     results.append(result)
-                    # 生成图表
-                    chart_path = os.path.join(RESULTS_DIR, "charts", f"{ts_code}_momentum.png")
-                    self.plot_stock_chart(data, ts_code, name, score_details, save_path=chart_path)
-            except Exception as e:
-                logger.error(f"分析{stock['name']}({stock['ts_code']})时出错: {str(e)}")
-                continue
                 
         # 按得分排序
         results.sort(key=lambda x: x['score'], reverse=True)

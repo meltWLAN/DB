@@ -6,14 +6,14 @@
 管理多个数据源，自动进行健康检查和故障转移
 """
 
-import time
+import time as time_module
 import logging
 import pandas as pd
 import numpy as np
 import os
 import json
 import concurrent.futures
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Union, Any, Tuple, Callable
 from functools import wraps, partial
 
@@ -22,7 +22,7 @@ from src.enhanced.data.fetchers.tushare_fetcher import EnhancedTushareFetcher
 from src.enhanced.data.fetchers.akshare_fetcher import EnhancedAKShareFetcher
 from src.enhanced.data.fetchers.joinquant_fetcher import EnhancedJoinQuantFetcher
 
-# 设置日志
+# 配置日志
 logger = logging.getLogger(__name__)
 
 # 独立的缓存装饰器函数
@@ -152,98 +152,165 @@ class DataSourceManager:
     管理多个数据源，提供健康检查和故障转移功能
     """
     
-    def __init__(self, config: Dict = None):
+    def __init__(self, config_file=None):
         """
         初始化数据源管理器
         
         Args:
-            config: 数据源配置字典，如果为None则使用默认配置
+            config_file: 配置文件路径
         """
-        self.config = config if config is not None else DATA_SOURCE_CONFIG
         self.data_sources = {}
+        self.data_source_config = {}
+        self._primary_source = None
+        self._secondary_source = None
+        
+        # 添加健康状态跟踪
         self.health_status = {}
         self.last_check_time = {}
         
-        # 健康检查配置
-        self.health_check_enabled = HEALTH_CHECK_CONFIG.get("enabled", True)
-        self.check_interval = HEALTH_CHECK_CONFIG.get("check_interval", 300)  # 默认5分钟
-        self.retry_interval = HEALTH_CHECK_CONFIG.get("retry_interval", 1800)  # 默认30分钟
+        # 添加健康检查配置
+        self.health_check_enabled = True
+        self.check_interval = 300  # 默认5分钟
+        self.retry_interval = 1800  # 默认30分钟
         
-        # 缓存配置
-        self.cache_enabled = CACHE_CONFIG.get("enabled", True)
-        self.cache_dir = ENHANCED_CACHE_DIR
-        self.disk_cache_max_age = CACHE_CONFIG.get("disk_cache_max_age", 24) * 3600  # 转换为秒
+        # 添加缓存相关配置
+        self.cache_enabled = True
+        self.cache_dir = "./cache"
+        self.disk_cache_max_age = 24 * 3600  # 默认24小时，转换为秒
         self.memory_cache = {}  # 内存缓存
         self.memory_cache_expires = {}  # 内存缓存过期时间
-        self.memory_cache_size = CACHE_CONFIG.get("memory_cache_size", 128) * 1024 * 1024  # 转换为字节
+        self.memory_cache_size = 128 * 1024 * 1024  # 默认128MB，转换为字节
         self.current_memory_cache_size = 0  # 当前内存缓存大小(字节)
         
         # 确保缓存目录存在
         os.makedirs(self.cache_dir, exist_ok=True)
         
+        # 加载配置
+        if config_file:
+            try:
+                with open(config_file, 'r') as f:
+                    self.data_source_config = json.load(f)
+            except Exception as e:
+                logger.error(f"加载配置文件 {config_file} 失败: {e}")
+                # 使用默认配置
+                self.data_source_config = {}
+        
+        # 如果配置文件加载失败或未提供，使用默认配置
+        if not self.data_source_config:
+            try:
+                self.data_source_config = DATA_SOURCE_CONFIG
+            except Exception as e:
+                logger.error(f"使用默认配置失败: {e}")
+                self.data_source_config = {}
+                
         # 初始化数据源
         self._init_data_sources()
         
-        # 记录主数据源
-        self.primary_source = self._get_primary_source_name()
+        # 设置主数据源和备用数据源
+        self._setup_primary_sources()
         
         logger.info(f"数据源管理器初始化完成，已注册 {len(self.data_sources)} 个数据源，主数据源: {self.primary_source}")
+                
+    def init_data_sources(self):
+        """
+        初始化数据源，公共方法，调用_init_data_sources
+        """
+        return self._init_data_sources()
     
     def _init_data_sources(self):
         """初始化所有启用的数据源"""
-        for source_name, source_config in self.config.items():
+        success_count = 0
+        
+        # 遍历所有配置的数据源
+        for source_name, source_config in self.data_source_config.items():
             if not source_config.get('enabled', False):
                 logger.info(f"数据源 {source_name} 未启用，跳过初始化")
                 continue
                 
             try:
+                # 初始化各类数据源
                 if source_name == 'tushare':
-                    tushare_config = source_config.copy()
-                    # 处理rate_limit配置
-                    if 'rate_limit' in tushare_config:
-                        rate_limit_config = tushare_config.pop('rate_limit')
-                        tushare_config['rate_limit'] = rate_limit_config.get('calls_per_minute', 500) / 60  # 转换为每秒请求数
-                    # 处理retry配置
-                    if 'retry' in tushare_config:
-                        retry_config = tushare_config.pop('retry')
-                        tushare_config['connection_retries'] = retry_config.get('max_retries', 3)
-                        tushare_config['retry_delay'] = retry_config.get('retry_interval', 5)
-                    
-                    self.data_sources['tushare'] = EnhancedTushareFetcher(tushare_config)
-                    self.health_status['tushare'] = True
-                    self.last_check_time['tushare'] = 0
+                    # 初始化 TuShare 数据源
+                    try:
+                        # 从settings.py获取有效token
+                        from src.enhanced.config.settings import DATA_SOURCE_CONFIG
+                        token = DATA_SOURCE_CONFIG.get('tushare', {}).get('token', '')
+                        if token:
+                            source_config['token'] = token
+                            
+                        self.data_sources[source_name] = EnhancedTushareFetcher(source_config)
+                        self.health_status[source_name] = True
+                        self.last_check_time[source_name] = time_module.time()
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"初始化数据源 {source_name} 失败: {str(e)}")
                     
                 elif source_name == 'akshare':
-                    akshare_config = source_config.copy()
-                    # 处理rate_limit配置
-                    if 'rate_limit' in akshare_config:
-                        rate_limit_config = akshare_config.pop('rate_limit')
-                        akshare_config['rate_limit'] = rate_limit_config.get('calls_per_minute', 120) / 60  # 转换为每秒请求数
-                    # 处理retry配置
-                    if 'retry' in akshare_config:
-                        retry_config = akshare_config.pop('retry')
-                        akshare_config['connection_retries'] = retry_config.get('max_retries', 3)
-                        akshare_config['retry_delay'] = retry_config.get('retry_interval', 5)
-                    
-                    self.data_sources['akshare'] = EnhancedAKShareFetcher(akshare_config)
-                    self.health_status['akshare'] = True
-                    self.last_check_time['akshare'] = 0
+                    # 初始化 AKShare 数据源
+                    try:
+                        self.data_sources[source_name] = EnhancedAKShareFetcher(source_config)
+                        self.health_status[source_name] = True
+                        self.last_check_time[source_name] = time_module.time()
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"初始化数据源 {source_name} 失败: {str(e)}")
                     
                 elif source_name == 'joinquant':
-                    self.data_sources['joinquant'] = EnhancedJoinQuantFetcher(source_config)
-                    self.health_status['joinquant'] = True
-                    self.last_check_time['joinquant'] = 0
+                    # 初始化 JoinQuant 数据源
+                    try:
+                        self.data_sources[source_name] = EnhancedJoinQuantFetcher(source_config)
+                        self.health_status[source_name] = True
+                        self.last_check_time[source_name] = time_module.time()
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"初始化数据源 {source_name} 失败: {str(e)}")
+                    
+                else:
+                    logger.warning(f"未知数据源类型 {source_name}，跳过初始化")
                     
             except Exception as e:
-                logger.error(f"初始化数据源 {source_name} 失败: {str(e)}")
-                self.health_status[source_name] = False
+                logger.error(f"初始化数据源 {source_name} 时发生错误: {str(e)}")
                 
-        logger.info(f"成功初始化 {len(self.data_sources)} 个数据源")
+        logger.info(f"成功初始化 {success_count} 个数据源")
+    
+    def _setup_primary_sources(self):
+        """设置主数据源和备用数据源"""
+        # 获取主数据源名称
+        primary_source_name = self._get_primary_source_name()
+        self.primary_source = primary_source_name
+        
+        # 设置主数据源
+        if primary_source_name in self.data_sources:
+            self._primary_source = self.data_sources[primary_source_name]
+            logger.info(f"设置 {primary_source_name} 为主数据源")
+        else:
+            # 如果未找到主数据源，使用第一个可用的
+            if self.data_sources:
+                first_source_name = next(iter(self.data_sources))
+                self._primary_source = self.data_sources[first_source_name]
+                self.primary_source = first_source_name
+                logger.warning(f"未找到主数据源，使用 {first_source_name} 作为主数据源")
+            else:
+                self._primary_source = None
+                self.primary_source = "none"
+                logger.error("未找到可用的数据源")
+                
+        # 设置备用数据源
+        if len(self.data_sources) > 1:
+            # 使用非主数据源作为备用数据源
+            for name, source in self.data_sources.items():
+                if name != primary_source_name:
+                    self._secondary_source = source
+                    logger.info(f"设置 {name} 为备用数据源")
+                    break
+        else:
+            # 如果只有一个数据源，备用数据源与主数据源相同
+            self._secondary_source = self._primary_source
     
     def _get_primary_source_name(self) -> str:
         """获取主数据源名称"""
         # 查找配置为主数据源的
-        for name, config in self.config.items():
+        for name, config in self.data_source_config.items():
             if config.get('is_primary', False) and name in self.data_sources:
                 return name
         
@@ -267,7 +334,7 @@ class DataSourceManager:
             # 健康检查禁用，假设所有数据源都健康
             return source_name in self.data_sources
         
-        now = time.time()
+        now = time_module.time()
         
         # 如果最近刚检查过，直接返回状态
         if now - self.last_check_time.get(source_name, 0) < self.check_interval:
@@ -332,7 +399,7 @@ class DataSourceManager:
         
         # 如果所有数据源都不健康，尝试重置一段时间前失败的数据源
         for source_name in self.data_sources:
-            if not self.health_status.get(source_name, True) and time.time() - self.last_check_time.get(source_name, 0) > self.retry_interval:
+            if not self.health_status.get(source_name, True) and time_module.time() - self.last_check_time.get(source_name, 0) > self.retry_interval:
                 # 重置检查时间，触发下次健康检查
                 self.last_check_time[source_name] = 0
         
@@ -352,9 +419,40 @@ class DataSourceManager:
     
     @with_cache(method_name="get_stock_list")
     @with_failover(method_name="get_stock_list")
-    def get_stock_list(self) -> Optional[pd.DataFrame]:
-        """获取股票列表，自动故障转移"""
-        pass
+    def get_stock_list(self, industry=None) -> Optional[pd.DataFrame]:
+        """
+        获取股票列表
+        
+        Args:
+            industry: 行业名称或代码，如果为None则获取所有股票
+            
+        Returns:
+            pandas.DataFrame: 股票列表，包含代码、名称等信息
+        """
+        try:
+            # 尝试从主数据源获取
+            if self._primary_source:
+                if hasattr(self._primary_source, 'get_stock_list'):
+                    data = self._primary_source.get_stock_list(industry)
+                    if data is not None and len(data) > 0:
+                        return data
+            
+            # 如果主数据源获取失败，尝试备用数据源
+            if self._secondary_source and self._secondary_source != self._primary_source:
+                if hasattr(self._secondary_source, 'get_stock_list'):
+                    logger.warning("主数据源获取股票列表失败，尝试备用数据源")
+                    data = self._secondary_source.get_stock_list(industry)
+                    if data is not None and len(data) > 0:
+                        return data
+            
+            # 如果都失败，返回空DataFrame
+            logger.error("无法获取股票列表，返回空DataFrame")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"获取股票列表失败: {e}")
+            # 返回一个空的DataFrame
+            return pd.DataFrame()
     
     @with_cache(method_name="get_daily_data")
     @with_failover(method_name="get_daily_data")
@@ -365,8 +463,33 @@ class DataSourceManager:
     @with_cache(method_name="get_industry_list")
     @with_failover(method_name="get_industry_list")
     def get_industry_list(self) -> Optional[pd.DataFrame]:
-        """获取行业列表，自动故障转移"""
-        pass
+        """
+        获取行业列表（适配 gui_controller 接口）
+        
+        Returns:
+            pandas.DataFrame: 行业列表，如果获取失败则返回 None
+        """
+        try:
+            # 尝试使用主数据源获取行业列表
+            if self._primary_source and hasattr(self._primary_source, 'get_industry_list'):
+                data = self._primary_source.get_industry_list()
+                if data is not None and len(data) > 0:
+                    return data
+            
+            # 如果主数据源获取失败，尝试备用数据源
+            if self._secondary_source and self._secondary_source != self._primary_source and hasattr(self._secondary_source, 'get_industry_list'):
+                logger.warning("主数据源获取行业列表失败，尝试备用数据源")
+                data = self._secondary_source.get_industry_list()
+                return data
+                
+            # 如果都失败，返回空的DataFrame
+            logger.error("无法获取行业列表，返回空的DataFrame")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"获取行业列表失败: {e}")
+            # 返回空的DataFrame
+            return pd.DataFrame()
     
     @with_cache(method_name="get_stock_fund_flow")
     @with_failover(method_name="get_stock_fund_flow")
@@ -411,7 +534,139 @@ class DataSourceManager:
         Returns:
             pd.DataFrame: 指数数据
         """
-        pass
+        try:
+            # 尝试从主数据源获取
+            if self._primary_source:
+                try:
+                    data = self._primary_source.get_stock_index_data(index_code, start_date, end_date)
+                    if data is not None and not data.empty:
+                        logger.info(f"成功从主数据源获取 {index_code} 的指数数据，包含 {len(data)} 条记录")
+                        return data
+                except Exception as e:
+                    logger.warning(f"主数据源获取指数 {index_code} 数据失败: {str(e)}")
+            
+            # 尝试从备用数据源获取
+            if self._secondary_source and self._secondary_source != self._primary_source:
+                try:
+                    data = self._secondary_source.get_stock_index_data(index_code, start_date, end_date)
+                    if data is not None and not data.empty:
+                        logger.info(f"成功从备用数据源获取 {index_code} 的指数数据，包含 {len(data)} 条记录")
+                        return data
+                except Exception as e:
+                    logger.warning(f"备用数据源获取指数 {index_code} 数据失败: {str(e)}")
+            
+            # 如果所有源都失败，返回None
+            logger.warning(f"所有数据源获取指数 {index_code} 数据失败")
+            return None
+        
+        except Exception as e:
+            logger.error(f"获取指数 {index_code} 数据出错: {str(e)}")
+            return None
+
+    def _generate_mock_index_data(self, index_code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """
+        生成模拟的指数数据
+        
+        Args:
+            index_code: 指数代码
+            start_date: 开始日期
+            end_date: 结束日期
+            
+        Returns:
+            pd.DataFrame: 模拟的指数数据
+        """
+        try:
+            # 解析日期
+            from datetime import datetime, timedelta
+            if end_date is None:
+                end_date = datetime.now().strftime('%Y-%m-%d')
+            if start_date is None:
+                # 默认生成30天的数据
+                start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # 创建日期范围
+            date_range = []
+            curr_dt = start_dt
+            while curr_dt <= end_dt:
+                # 跳过周末
+                if curr_dt.weekday() < 5:  # 0-4是周一到周五
+                    date_range.append(curr_dt.strftime('%Y-%m-%d'))
+                curr_dt += timedelta(days=1)
+            
+            # 使用稳定的种子确保同一指数每次生成的模拟数据一致
+            import numpy as np
+            
+            # 修复: 确保种子在有效范围内 (0到2^32-1)
+            # 使用指数代码的哈希值的绝对值，然后取模以确保在范围内
+            seed_hash = abs(hash(index_code))
+            seed = seed_hash % (2**32 - 1)  
+            np.random.seed(seed)
+            
+            # 基础价格根据指数类型设置
+            if '000001.SH' in index_code:  # 上证指数
+                base_price = 3000 + np.random.uniform(-300, 300)
+            elif '399001' in index_code:  # 深证成指
+                base_price = 10000 + np.random.uniform(-1000, 1000)
+            elif '399006' in index_code:  # 创业板指
+                base_price = 2000 + np.random.uniform(-200, 200)
+            elif '000300' in index_code:  # 沪深300
+                base_price = 3500 + np.random.uniform(-350, 350)
+            elif '000016' in index_code:  # 上证50
+                base_price = 2500 + np.random.uniform(-250, 250)
+            elif '000905' in index_code:  # 中证500
+                base_price = 6000 + np.random.uniform(-600, 600)
+            else:
+                base_price = 1000 + np.random.uniform(-100, 100)
+            
+            # 生成价格和成交量
+            prices = []
+            volumes = []
+            for i in range(len(date_range)):
+                if i == 0:
+                    prices.append(base_price)
+                else:
+                    change_pct = np.random.normal(0, 0.01)  # 每日涨跌幅，均值为0，标准差为1%
+                    prices.append(prices[i-1] * (1 + change_pct))
+                volumes.append(np.random.randint(100000, 10000000))  # 随机成交量
+            
+            # 创建DataFrame
+            data = {
+                'ts_code': index_code,
+                'trade_date': date_range,
+                'open': [price * (1 + np.random.normal(0, 0.003)) for price in prices],
+                'high': [price * (1 + abs(np.random.normal(0, 0.005))) for price in prices],
+                'low': [price * (1 - abs(np.random.normal(0, 0.005))) for price in prices],
+                'close': prices,
+                'vol': volumes,
+                'amount': [vol * price / 1000 * np.random.uniform(0.95, 1.05) for vol, price in zip(volumes, prices)]
+            }
+            
+            # 计算涨跌幅
+            data['change'] = [0] + [prices[i] - prices[i-1] for i in range(1, len(prices))]
+            data['pct_chg'] = [0] + [(prices[i] / prices[i-1] - 1) * 100 for i in range(1, len(prices))]
+            
+            mock_df = pd.DataFrame(data)
+            
+            # 重置随机数种子
+            np.random.seed(None)
+            
+            logger.warning(f"生成 {index_code} 的模拟指数数据，包含 {len(mock_df)} 条记录")
+            return mock_df
+            
+        except Exception as e:
+            logger.error(f"生成模拟指数数据出错: {str(e)}")
+            # 出错时返回至少包含基本结构的空DataFrame
+            import pandas as pd
+            empty_df = pd.DataFrame({
+                'ts_code': [index_code],
+                'trade_date': [datetime.now().strftime('%Y-%m-%d')],
+                'open': [0], 'high': [0], 'low': [0], 'close': [0],
+                'vol': [0], 'amount': [0], 'pct_chg': [0]
+            })
+            return empty_df
         
     @with_cache(method_name="get_stock_holder_change")
     @with_failover(method_name="get_stock_holder_change")
@@ -932,7 +1187,7 @@ class DataSourceManager:
                         
                     # 保存到内存缓存
                     self.memory_cache[cache_key] = data.copy()
-                    self.memory_cache_expires[cache_key] = time.time() + self.disk_cache_max_age
+                    self.memory_cache_expires[cache_key] = time_module.time() + self.disk_cache_max_age
                     self.current_memory_cache_size += data_size
                     logger.debug(f"数据已保存到内存缓存，键={cache_key}，大小={data_size / 1024 / 1024:.2f}MB")
                 
@@ -970,7 +1225,7 @@ class DataSourceManager:
         try:
             # 先尝试从内存缓存获取
             if cache_key in self.memory_cache:
-                if time.time() < self.memory_cache_expires[cache_key]:
+                if time_module.time() < self.memory_cache_expires[cache_key]:
                     logger.debug(f"从内存缓存获取数据，键={cache_key}")
                     return self.memory_cache[cache_key]
                 else:
@@ -986,7 +1241,7 @@ class DataSourceManager:
             if os.path.exists(cache_file):
                 # 检查文件修改时间，判断是否过期
                 file_mtime = os.path.getmtime(cache_file)
-                if time.time() - file_mtime < self.disk_cache_max_age:
+                if time_module.time() - file_mtime < self.disk_cache_max_age:
                     logger.debug(f"从磁盘缓存获取数据，文件={cache_file}")
                     return pd.read_parquet(cache_file)
                 else:
@@ -1027,7 +1282,7 @@ class DataSourceManager:
     @with_cache(method_name='get_trading_dates')
     def get_trading_dates(self, start_date: str, end_date: str = None) -> Optional[List[str]]:
         """
-        获取交易日历
+        获取交易日历，按照中国股市交易规则
         
         Args:
             start_date: 开始日期
@@ -1053,121 +1308,260 @@ class DataSourceManager:
             logger.debug(f"数据源 {source_name} 没有实现get_trading_dates方法，使用替代方法")
             
             # 尝试获取上证指数数据作为交易日参考
+            # 中国股市交易日特征: 工作日(周一至周五)，排除法定节假日
+            # 法定节假日包括: 元旦、春节、清明节、劳动节、端午节、中秋节、国庆节等
             index_data = self.get_stock_index_data('000001.SH', start_date, end_date)
-            if index_data is not None and not index_data.empty:
+            if index_data is not None and not index_data.empty and 'date' in index_data.columns:
                 trading_dates = index_data['date'].tolist()
                 trading_dates.sort()
                 return trading_dates
-                
-            logger.warning("无法获取交易日历")
+            
+            # 如果无法通过指数数据获取，尝试其他方法
+            logger.warning("无法通过指数数据获取交易日历，尝试使用交易日API")
+            
+            # 尝试使用特定的交易日历API
+            if self._primary_source and hasattr(self._primary_source, '_execute_api_call'):
+                try:
+                    # 转换日期格式
+                    start_date_fmt = start_date.replace('-', '')
+                    end_date_fmt = end_date.replace('-', '') if end_date else datetime.now().strftime('%Y%m%d')
+                    
+                    # 使用TuShare的trade_cal接口
+                    trade_cal = self._primary_source._execute_api_call('trade_cal', 
+                                                                       start_date=start_date_fmt, 
+                                                                       end_date=end_date_fmt,
+                                                                       is_open='1')  # is_open=1表示交易日
+                    
+                    if trade_cal is not None and not trade_cal.empty and 'cal_date' in trade_cal.columns:
+                        # 转换日期格式
+                        trade_cal['cal_date'] = pd.to_datetime(trade_cal['cal_date']).dt.strftime('%Y-%m-%d')
+                        trading_dates = trade_cal['cal_date'].tolist()
+                        trading_dates.sort()
+                        return trading_dates
+                except Exception as e:
+                    logger.error(f"获取交易日历API失败: {str(e)}")
+            
+            logger.warning("无法获取中国股市交易日历，返回None")
             return None
             
         except Exception as e:
             logger.error(f"获取交易日历失败: {str(e)}")
             return None
             
-    def get_latest_trading_date(self) -> Optional[str]:
+    def is_trading_day(self, date_str: str) -> bool:
         """
-        获取最新交易日
-        
-        Returns:
-            str: 最新交易日日期
-        """
-        # 查询最近10天的交易日历
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-        
-        trading_dates = self.get_trading_dates(start_date, end_date)
-        if trading_dates:
-            return trading_dates[-1]
-            
-        return None
-        
-    def is_trading_date(self, date_str: str) -> bool:
-        """
-        判断是否为交易日
+        检查给定日期是否为交易日，根据中国股市交易规则
         
         Args:
-            date_str: 日期字符串
+            date_str: 日期字符串，格式 YYYY-MM-DD
             
         Returns:
             bool: 是否为交易日
         """
-        # 将日期转换为标准格式
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-        
-        # 查询当月的交易日历
-        start_date = date_obj.replace(day=1).strftime('%Y-%m-%d')
-        end_date = (date_obj.replace(day=1) + timedelta(days=31)).replace(day=1) - timedelta(days=1)
-        end_date = end_date.strftime('%Y-%m-%d')
-        
-        trading_dates = self.get_trading_dates(start_date, end_date)
-        if trading_dates:
-            return date_str in trading_dates
+        try:
+            # 格式化日期
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
             
-        return False
+            # 快速检查：周末不是交易日
+            if date_obj.weekday() >= 5:  # 5是周六，6是周日
+                return False
+                
+            # 检查是否在交易日历中
+            source_name = self.get_healthy_source()
+            if not source_name:
+                logger.warning("没有健康的数据源来检查交易日")
+                # 使用备选方案: 直接检查工作日
+                return date_obj.weekday() < 5  # 周一至周五
+                
+            # 使用数据源API检查
+            data_source = self.data_sources[source_name]
+            if hasattr(data_source, '_execute_api_call'):
+                try:
+                    # 转换日期格式
+                    date_fmt = date_str.replace('-', '')
+                    
+                    # 查询该日期是否为交易日
+                    is_trade_day = data_source._execute_api_call('trade_cal', 
+                                                               exchange='SSE', 
+                                                               start_date=date_fmt, 
+                                                               end_date=date_fmt,
+                                                               is_open='1')  # is_open=1表示交易日
+                                                           
+                    return is_trade_day is not None and not is_trade_day.empty
+                except Exception as e:
+                    logger.error(f"查询交易日失败: {str(e)}")
+                    
+            # 如果上述方法失败，尝试获取一个月的交易日历
+            start_date = (date_obj - timedelta(days=15)).strftime('%Y-%m-%d')
+            end_date = (date_obj + timedelta(days=15)).strftime('%Y-%m-%d')
+            
+            trading_dates = self.get_trading_dates(start_date, end_date)
+            if trading_dates and date_str in trading_dates:
+                return True
+                
+            return False
+        except Exception as e:
+            logger.error(f"检查交易日失败: {str(e)}")
+            # 默认当作不是交易日处理
+            return False
+
+    def get_latest_trading_date(self) -> Optional[str]:
+        """
+        获取最近的交易日期（不含当日，如当日为交易日则返回上一交易日）
+        按照中国股市交易规则
+        
+        Returns:
+            str: 最近的交易日期，如果获取失败则返回None
+        """
+        try:
+            # 获取当前日期
+            today = datetime.now().strftime('%Y-%m-%d')
+            current_time = datetime.now().time()
+            
+            # 如果当天是交易日且为开盘时间(9:30-15:00)，则返回当天
+            if self.is_trading_day(today) and \
+               ((current_time >= datetime.strptime('09:30', '%H:%M').time() and current_time <= datetime.strptime('11:30', '%H:%M').time()) or \
+                (current_time >= datetime.strptime('13:00', '%H:%M').time() and current_time <= datetime.strptime('15:00', '%H:%M').time())):
+                return today
+                
+            # 否则返回最近一个交易日
+            return self.get_previous_trading_date(today)
+        except Exception as e:
+            logger.error(f"获取最近交易日期失败: {str(e)}")
+            return None
         
     def get_previous_trading_date(self, date_str: str, n: int = 1) -> Optional[str]:
         """
-        获取前N个交易日
+        获取前N个交易日，按照中国股市规则
         
         Args:
-            date_str: 日期字符串
+            date_str: 日期字符串，格式 YYYY-MM-DD
             n: 前N个交易日
             
         Returns:
-            str: 前N个交易日日期
+            str: 前N个交易日日期，如果获取失败则返回None
         """
         # 将日期转换为标准格式
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError as e:
+            logger.error(f"日期格式错误: {date_str}，应为YYYY-MM-DD格式: {str(e)}")
+            return None
         
-        # 查询前30天的交易日历
+        # 查询前40天的交易日历，确保能覆盖n个交易日
+        # 中国股市春节假期可能长达10天左右，保险起见取40天
         end_date = date_str
-        start_date = (date_obj - timedelta(days=30)).strftime('%Y-%m-%d')
+        start_date = (date_obj - timedelta(days=40)).strftime('%Y-%m-%d')
         
         trading_dates = self.get_trading_dates(start_date, end_date)
-        if trading_dates:
-            trading_dates.sort()
-            date_index = trading_dates.index(date_str) if date_str in trading_dates else len(trading_dates)
+        if not trading_dates:
+            logger.warning(f"获取从 {start_date} 到 {end_date} 的交易日历失败")
             
+            # 如果获取交易日历失败，尝试基于工作日的简单推算（不含节假日考虑）
+            fallback_date = date_obj
+            business_days_count = 0
+            max_iterations = 100  # 防止无限循环
+            iterations = 0
+            
+            while business_days_count < n and iterations < max_iterations:
+                fallback_date = fallback_date - timedelta(days=1)
+                iterations += 1
+                # 仅考虑周一至周五
+                if fallback_date.weekday() < 5:  # 0-4是周一至周五
+                    business_days_count += 1
+            
+            logger.warning(f"使用工作日简单推算，前{n}个工作日是 {fallback_date.strftime('%Y-%m-%d')}，未考虑法定节假日")
+            return fallback_date.strftime('%Y-%m-%d')
+        
+        # 将日期列表排序
+        trading_dates.sort()
+        
+        # 查找当前日期的位置
+        if date_str in trading_dates:
+            date_index = trading_dates.index(date_str)
+            
+            # 如果索引位置足够大，返回前n个交易日
             if date_index >= n:
                 return trading_dates[date_index - n]
-                
-        return None
-        
+            else:
+                logger.warning(f"交易日历中的日期不足以获取前{n}个交易日")
+                return trading_dates[0] if trading_dates else None
+        else:
+            # 如果当前日期不是交易日，找到小于当前日期的最近交易日
+            prev_dates = [d for d in trading_dates if d < date_str]
+            if len(prev_dates) >= n:
+                return prev_dates[-n]
+            else:
+                logger.warning(f"交易日历中的日期不足以获取前{n}个交易日")
+                return prev_dates[0] if prev_dates else None
+            
     def get_next_trading_date(self, date_str: str, n: int = 1) -> Optional[str]:
         """
-        获取后N个交易日
+        获取后N个交易日，按照中国股市规则
         
         Args:
-            date_str: 日期字符串
+            date_str: 日期字符串，格式 YYYY-MM-DD
             n: 后N个交易日
             
         Returns:
-            str: 后N个交易日日期
+            str: 后N个交易日日期，如果获取失败则返回None
         """
         # 将日期转换为标准格式
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        try:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        except ValueError as e:
+            logger.error(f"日期格式错误: {date_str}，应为YYYY-MM-DD格式: {str(e)}")
+            return None
         
-        # 查询后30天的交易日历
+        # 查询后40天的交易日历
+        # 中国股市春节假期可能长达10天左右，保险起见取40天
         start_date = date_str
-        end_date = (date_obj + timedelta(days=30)).strftime('%Y-%m-%d')
+        end_date = (date_obj + timedelta(days=40)).strftime('%Y-%m-%d')
         
         trading_dates = self.get_trading_dates(start_date, end_date)
-        if trading_dates:
-            trading_dates.sort()
-            if date_str in trading_dates:
-                date_index = trading_dates.index(date_str)
-                if date_index + n < len(trading_dates):
-                    return trading_dates[date_index + n]
-            else:
-                # 如果当前日期不是交易日，找到下一个交易日
-                next_dates = [d for d in trading_dates if d > date_str]
-                if len(next_dates) >= n:
-                    return next_dates[n-1]
-                    
-        return None
+        if not trading_dates:
+            logger.warning(f"获取从 {start_date} 到 {end_date} 的交易日历失败")
+            
+            # 如果获取交易日历失败，尝试基于工作日的简单推算（不含节假日考虑）
+            fallback_date = date_obj
+            business_days_count = 0
+            max_iterations = 100  # 防止无限循环
+            iterations = 0
+            
+            while business_days_count < n and iterations < max_iterations:
+                fallback_date = fallback_date + timedelta(days=1)
+                iterations += 1
+                # 仅考虑周一至周五
+                if fallback_date.weekday() < 5:  # 0-4是周一至周五
+                    business_days_count += 1
+            
+            logger.warning(f"使用工作日简单推算，后{n}个工作日是 {fallback_date.strftime('%Y-%m-%d')}，未考虑法定节假日")
+            return fallback_date.strftime('%Y-%m-%d')
         
+        # 将日期列表排序
+        trading_dates.sort()
+        
+        # 查找当前日期的位置
+        if date_str in trading_dates:
+            date_index = trading_dates.index(date_str)
+            
+            # 如果有足够的后续交易日
+            if date_index + n < len(trading_dates):
+                return trading_dates[date_index + n]
+            else:
+                logger.warning(f"交易日历中的日期不足以获取后{n}个交易日")
+                return trading_dates[-1] if trading_dates else None
+        else:
+            # 如果当前日期不是交易日，找到大于当前日期的最近交易日
+            next_dates = [d for d in trading_dates if d > date_str]
+            
+            # 如果有足够的后续交易日
+            if len(next_dates) >= n:
+                return next_dates[n-1]
+            else:
+                logger.warning(f"交易日历中的日期不足以获取后{n}个交易日")
+                return next_dates[-1] if next_dates else None
+
     def get_data_sources_status(self) -> Dict[str, Dict]:
         """
         获取所有数据源的状态信息
@@ -1185,3 +1579,245 @@ class DataSourceManager:
             status[source_name] = source_status
             
         return status 
+
+    def get_index_daily(self, index_code, start_date=None, end_date=None, limit=None):
+        """
+        获取指数日线数据（适配 gui_controller 接口）
+        
+        Args:
+            index_code: 指数代码，如 '000001.SH'
+            start_date: 起始日期，格式为 YYYY-MM-DD，默认为 None
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为 None
+            limit: 获取条数限制，默认为 None
+            
+        Returns:
+            pandas.DataFrame: 指数日线数据，如果获取失败则返回 None
+        """
+        try:
+            # 如果只提供了 limit 但没有提供日期范围，设置合理的默认日期范围
+            if start_date is None and limit is not None:
+                from datetime import datetime, timedelta
+                end_date = datetime.now().strftime('%Y-%m-%d')
+                start_date = (datetime.now() - timedelta(days=limit * 2)).strftime('%Y-%m-%d')
+            
+            # 调用底层接口
+            data = self.get_stock_index_data(index_code, start_date, end_date)
+            
+            # 如果底层接口返回为空，尝试其他数据源
+            if data is None or len(data) == 0:
+                if self._secondary_source and self._secondary_source != self._primary_source:
+                    logger.warning(f"主数据源获取指数 {index_code} 数据失败，尝试备用数据源")
+                    data = self._secondary_source.get_stock_index_data(index_code, start_date, end_date)
+            
+            # 如果指定了limit且数据不为空，返回最近的limit条记录
+            if data is not None and limit is not None and len(data) > limit:
+                return data.head(limit)
+            
+            return data
+        except Exception as e:
+            logger.error(f"获取指数 {index_code} 日线数据失败: {e}")
+            return None
+            
+    @with_cache(method_name="get_stock_data")
+    @with_failover(method_name="get_daily_data")
+    def get_stock_data(self, stock_code: str, start_date: str = None, end_date: str = None, limit: int = None) -> Optional[pd.DataFrame]:
+        """
+        获取股票日线数据（适配 gui_controller 接口）
+        
+        Args:
+            stock_code: 股票代码，如 '000001.SZ'
+            start_date: 起始日期，格式为 YYYY-MM-DD，默认为 None
+            end_date: 结束日期，格式为 YYYY-MM-DD，默认为 None
+            limit: 获取条数限制，默认为 None
+            
+        Returns:
+            pandas.DataFrame: 股票日线数据，如果获取失败则返回 None
+        """
+        try:
+            # 如果未提供起始日期但提供了limit，设置默认起始日期
+            if start_date is None and limit is not None:
+                from datetime import datetime, timedelta
+                end_date = datetime.now().strftime('%Y-%m-%d') if end_date is None else end_date
+                start_date = (datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=limit * 2)).strftime('%Y-%m-%d')
+                
+            # 调用 get_daily_data 方法
+            data = self.get_daily_data(stock_code, start_date, end_date)
+            
+            # 如果获取成功，进行处理
+            if data is not None and not data.empty:
+                # 如果提供了limit，截取最近的数据
+                if limit is not None and len(data) > limit:
+                    data = data.sort_values('date', ascending=False).head(limit).sort_values('date')
+                    
+                return data
+            else:
+                # 如果没有获取到数据，返回None而不是生成模拟数据
+                logger.warning(f"无法获取股票 {stock_code} 数据，未使用模拟数据替代")
+                return None
+        except Exception as e:
+            logger.error(f"获取股票 {stock_code} 日线数据失败: {e}")
+            return None
+            
+    def _generate_mock_stock_data(self, stock_code: str, start_date: str = None, end_date: str = None, limit: int = None) -> pd.DataFrame:
+        """
+        生成模拟的股票日线数据
+        
+        Args:
+            stock_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            limit: 获取条数限制
+            
+        Returns:
+            pandas.DataFrame: 模拟的股票日线数据
+        """
+        try:
+            # 解析日期
+            from datetime import datetime, timedelta
+            if end_date is None:
+                end_date = datetime.now().strftime('%Y-%m-%d')
+            if start_date is None:
+                # 默认生成30天的数据
+                start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+                
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            
+            # 创建日期范围
+            date_range = []
+            curr_dt = start_dt
+            while curr_dt <= end_dt:
+                # 跳过周末
+                if curr_dt.weekday() < 5:  # 0-4是周一到周五
+                    date_range.append(curr_dt.strftime('%Y%m%d'))
+                curr_dt += timedelta(days=1)
+                
+            # 如果有限制条数，截取最近的数据
+            if limit is not None and len(date_range) > limit:
+                date_range = date_range[-limit:]
+                
+            # 确保种子在有效范围内
+            import numpy as np
+            seed = int(hash(stock_code) % (2**32 - 1))  # 确保种子在合法范围内
+            np.random.seed(seed)
+            
+            # 生成随机价格和成交量
+            base_price = np.random.uniform(10, 100)  # 基础价格
+            prices = []
+            volumes = []
+            for i in range(len(date_range)):
+                if i == 0:
+                    prices.append(base_price)
+                else:
+                    change_pct = np.random.normal(0, 0.02)  # 每日涨跌幅，均值为0，标准差为2%
+                    prices.append(prices[i-1] * (1 + change_pct))
+                volumes.append(np.random.randint(10000, 1000000))  # 随机成交量
+                
+            # 创建DataFrame
+            data = {
+                'ts_code': stock_code,
+                'trade_date': date_range,
+                'open': [price * (1 + np.random.normal(0, 0.005)) for price in prices],
+                'high': [price * (1 + abs(np.random.normal(0, 0.01))) for price in prices],
+                'low': [price * (1 - abs(np.random.normal(0, 0.01))) for price in prices],
+                'close': prices,
+                'vol': volumes,
+                'amount': [vol * price * np.random.uniform(0.9, 1.1) for vol, price in zip(volumes, prices)],
+                'change': [0] + [prices[i] - prices[i-1] for i in range(1, len(prices))],
+                'pct_chg': [0] + [(prices[i] / prices[i-1] - 1) * 100 for i in range(1, len(prices))]
+            }
+            
+            mock_df = pd.DataFrame(data)
+            
+            # 重置随机数种子
+            np.random.seed(None)
+            
+            logger.warning(f"返回 {stock_code} 的模拟股票数据")
+            return mock_df
+            
+        except Exception as e:
+            logger.error(f"生成模拟股票数据失败: {e}")
+            # 出错时返回空DataFrame
+            return pd.DataFrame()
+
+    def get_stocks_in_industry(self, industry_code):
+        """
+        获取行业成分股（适配 gui_controller 接口）
+        
+        Args:
+            industry_code: 行业代码
+            
+        Returns:
+            pandas.DataFrame: 行业成分股，如果获取失败则返回 None
+        """
+        try:
+            if self._primary_source and hasattr(self._primary_source, 'get_stocks_in_industry'):
+                data = self._primary_source.get_stocks_in_industry(industry_code)
+                if data is not None and len(data) > 0:
+                    return data
+            
+            # 如果主数据源获取失败，尝试备用数据源
+            if self._secondary_source and self._secondary_source != self._primary_source and hasattr(self._secondary_source, 'get_stocks_in_industry'):
+                logger.warning(f"主数据源获取行业 {industry_code} 成分股失败，尝试备用数据源")
+                data = self._secondary_source.get_stocks_in_industry(industry_code)
+                return data
+                
+            # 如果都失败，返回空DataFrame
+            logger.error(f"无法获取行业 {industry_code} 成分股，返回空DataFrame")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"获取行业 {industry_code} 成分股失败: {e}")
+            return pd.DataFrame()
+    
+    def get_daily_market_data(self):
+        """
+        获取市场日线数据（适配 gui_controller 接口）
+        
+        Returns:
+            pandas.DataFrame: 市场日线数据，如果获取失败则返回 None
+        """
+        try:
+            # 获取股票列表
+            stock_list = self.get_stock_list()
+            if stock_list is None or len(stock_list) == 0:
+                logger.error("获取股票列表失败")
+                return pd.DataFrame()
+            
+            # 获取当前日期
+            from datetime import datetime
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            
+            # 随机抽样最多100支股票获取行情
+            import pandas as pd
+            
+            if len(stock_list) > 100:
+                sample_stocks = stock_list.sample(100)
+            else:
+                sample_stocks = stock_list
+            
+            # 存储所有股票当日行情
+            all_data = []
+            
+            for _, stock in sample_stocks.iterrows():
+                ts_code = stock['ts_code']
+                try:
+                    # 获取最近的一条数据
+                    data = self.get_stock_data(ts_code, start_date=current_date, end_date=current_date)
+                    
+                    if data is not None and len(data) > 0:
+                        all_data.append(data.iloc[0])
+                except Exception:
+                    continue
+            
+            if len(all_data) > 0:
+                result_df = pd.DataFrame(all_data)
+                return result_df
+            
+            # 如果无法获取任何数据，返回空DataFrame
+            logger.warning("无法获取市场日线数据，返回空DataFrame")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"获取市场日线数据失败: {e}")
+            return pd.DataFrame() 

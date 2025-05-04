@@ -50,14 +50,10 @@ DATA_SOURCE_CONFIG = {
         "token": "0e65a5c636112dc9d9af5ccc93ef06c55987805b9467db0866185a10",  # Tushare API token
         "enabled": True,
         "is_primary": True,
-        "rate_limit": {
-            "calls_per_minute": 500,  # 每分钟API调用次数限制
-            "pause_on_limit": True,   # 达到限制时暂停
-        },
-        "retry": {
-            "max_retries": 3,         # 最大重试次数
-            "retry_interval": 5,      # 重试间隔(秒)
-        }
+        "connection_retries": 3,
+        "retry_delay": 2,
+        "rate_limit": 3,  # 每秒请求数
+        "default_start_date": "2020-01-01"
     },
     # AKShare配置
     "akshare": {

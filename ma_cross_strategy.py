@@ -6,7 +6,7 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as pl
+import matplotlib.pyplot as plt
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -319,7 +319,7 @@ class MACrossStrategy:
                         if new_shares > 0:
                             cost = new_shares * current_price
                             shares = new_shares
-                            capital -= cos
+                            capital -= cost
                             cost_price = current_price
                     # 卖出信号
                     elif current_position < prev_position or stop_loss_triggered:
@@ -398,6 +398,135 @@ class MACrossStrategy:
             'win_rate': win_rate,
             'current_signal': current_signal
         }
+    def backtest_strategy_vectorized(self, data, initial_capital=100000, stop_loss_pct=0.05):
+        """使用矢量化操作回测均线交叉策略 (优化速度版本)"""
+        if data.empty or 'position' not in data.columns:
+            logger.warning("数据为空或未包含持仓信息，无法进行回测")
+            return None
+            
+        # 拷贝数据，避免修改原始数据
+        df = data.copy()
+        
+        # 获取价格和仓位数据
+        close_prices = df['close'].values
+        positions = df['position'].values
+        dates = df.index
+        
+        # 初始化数组
+        n = len(df)
+        capitals = np.zeros(n)
+        shares_arr = np.zeros(n)
+        cost_prices = np.zeros(n)
+        stop_losses = np.zeros(n, dtype=bool)
+        
+        # 初始资金和状态
+        capital = initial_capital
+        shares = 0
+        cost_price = 0
+        
+        # 使用numpy进行快速计算
+        for i in range(n):
+            current_price = close_prices[i]
+            current_position = positions[i]
+            prev_position = 0 if i == 0 else positions[i-1]
+            
+            # 检查是否触发止损
+            stop_loss_triggered = False
+            if shares > 0 and cost_price > 0:
+                if (current_price / cost_price - 1) < -stop_loss_pct:
+                    stop_loss_triggered = True
+                    current_position = 0  # 强制卖出
+                    stop_losses[i] = True
+            
+            # 持仓变化
+            if current_position != prev_position or stop_loss_triggered:
+                # 买入信号
+                if current_position > prev_position:
+                    # 计算可买入的股数（整数）
+                    new_shares = int(capital // current_price)
+                    if new_shares > 0:
+                        cost = new_shares * current_price
+                        shares = new_shares
+                        capital -= cost
+                        cost_price = current_price
+                # 卖出信号
+                elif current_position < prev_position or stop_loss_triggered:
+                    if shares > 0:
+                        # 卖出所有股票
+                        capital += shares * current_price
+                        shares = 0
+                        cost_price = 0
+            
+            # 记录当前状态
+            shares_arr[i] = shares
+            cost_prices[i] = cost_price
+            capitals[i] = capital + shares * current_price
+        
+        # 将结果写回DataFrame
+        df['shares'] = shares_arr
+        df['cost_price'] = cost_prices
+        df['stop_loss'] = stop_losses
+        df['capital'] = capitals
+        df['strategy_return'] = (df['capital'] / initial_capital) - 1
+        
+        # 计算回测指标
+        df['peak'] = df['capital'].cummax()
+        df['drawdown'] = (df['capital'] - df['peak']) / df['peak']
+        max_drawdown = abs(df['drawdown'].min()) if not df['drawdown'].isna().all() else 0
+        
+        # 年化收益率
+        days = (dates[-1] - dates[0]).days
+        if days > 0:
+            annual_return = (capitals[-1] / initial_capital) ** (365 / days) - 1
+        else:
+            annual_return = 0
+            
+        # 总收益率
+        total_return = (capitals[-1] / initial_capital) - 1
+        
+        # 计算胜率 - 优化计算方式，避免循环
+        # 找出所有交易点
+        position_changes = np.diff(positions, prepend=0)
+        buy_points = position_changes > 0
+        sell_points = position_changes < 0
+        
+        # 如果有买卖点，计算胜率
+        if np.any(buy_points) and np.any(sell_points):
+            buy_prices = close_prices[buy_points]
+            # 对每个买入点，找到下一个卖出点
+            trades = []
+            buy_indices = np.where(buy_points)[0]
+            sell_indices = np.where(sell_points)[0]
+            
+            for buy_idx in buy_indices:
+                # 找到下一个卖出点
+                next_sells = sell_indices[sell_indices > buy_idx]
+                if len(next_sells) > 0:
+                    sell_idx = next_sells[0]
+                    trades.append(close_prices[sell_idx] / close_prices[buy_idx] - 1)
+            
+            # 如果最后一个交易还未卖出，计算到最后一天的收益
+            if buy_indices[-1] > sell_indices[-1] if len(sell_indices) > 0 else True:
+                trades.append(close_prices[-1] / close_prices[buy_indices[-1]] - 1)
+                
+            # 计算胜率
+            win_rate = np.sum(np.array(trades) > 0) / len(trades) if trades else 0
+        else:
+            win_rate = 0
+            
+        # 当前信号
+        latest_pos = positions[-1]
+        current_signal = "买入" if latest_pos > 0 else "卖出"
+        
+        # 返回回测结果
+        return {
+            'backtest_data': df,
+            'total_return': total_return,
+            'annual_return': annual_return,
+            'max_drawdown': max_drawdown,
+            'win_rate': win_rate,
+            'current_signal': current_signal
+        }
     def plot_ma_strategy_chart(self, data, backtest_result, stock_code, stock_name, save_path=None):
         """绘制均线交叉策略回测图表"""
         if data.empty or backtest_result is None:
@@ -465,9 +594,14 @@ class MACrossStrategy:
         else:
             plt.show()
             return True
-    def run_strategy(self, stock_list, short_ma=5, long_ma=20, initial_capital=100000, stop_loss_pct=0.05):
+    def run_strategy(self, stock_list, short_ma=5, long_ma=20, initial_capital=100000, stop_loss_pct=0.05, sample_size=None):
         """对股票列表运行均线交叉策略"""
         results = []
+        
+        # 如果提供了sample_size，则仅分析指定数量的股票
+        if sample_size and sample_size < len(stock_list):
+            stock_list = stock_list.head(sample_size)
+            
         total = len(stock_list)
         for idx, (_, stock) in enumerate(stock_list.iterrows()):
             try:
@@ -475,24 +609,29 @@ class MACrossStrategy:
                 name = stock['name']
                 industry = stock.get('industry', '')
                 logger.info(f"策略进度: {idx+1}/{total} - 正在分析: {name}({ts_code})")
+                
                 # 获取日线数据
                 data = self.get_stock_daily_data(ts_code)
                 if data.empty:
                     logger.warning(f"无法获取{ts_code}的数据，跳过分析")
                     continue
+                    
                 # 计算均线和信号
                 data = self.calculate_ma_signals(data, short_ma=short_ma, long_ma=long_ma)
                 if data.empty:
                     logger.warning(f"计算{ts_code}的信号失败，跳过分析")
                     continue
-                # 回测策略
+                    
+                # 回测策略（使用优化版本）
                 try:
-                    backtest_result = self.backtest_strategy(data, initial_capital=initial_capital, stop_loss_pct=stop_loss_pct)
+                    backtest_result = self.backtest_strategy_vectorized(data, initial_capital=initial_capital, stop_loss_pct=stop_loss_pct)
                     if backtest_result is None:
                         logger.warning(f"回测{ts_code}的策略失败，跳过分析")
                         continue
+                        
                     # 获取最新价格
                     latest = data.iloc[-1]
+                    
                     # 转换信号为标准文本格式
                     signal_text = "无信号"
                     raw_signal = backtest_result['current_signal']
@@ -504,6 +643,7 @@ class MACrossStrategy:
                         signal_text = "持有多头"
                     elif latest['position'] == 0 and latest.get('signal') == 0:
                         signal_text = "观望"
+                        
                     # 保存结果
                     result = {
                         'ts_code': ts_code,
@@ -518,12 +658,14 @@ class MACrossStrategy:
                         'max_drawdown': backtest_result['max_drawdown'],
                         'win_rate': backtest_result['win_rate'],
                         'data': data,
-                        'backtest_result': backtest_resul
+                        'backtest_result': backtest_result
                     }
                     results.append(result)
+                    
                     # 生成图表
                     chart_path = os.path.join(RESULTS_DIR, "ma_charts", f"{ts_code}_ma_cross.png")
                     self.plot_ma_strategy_chart(data, backtest_result, ts_code, name, save_path=chart_path)
+                    
                 except Exception as e:
                     logger.error(f"回测{ts_code}的策略失败: {str(e)}")
                     # 简化的结果，包含基本信息但没有回测数据
@@ -542,8 +684,10 @@ class MACrossStrategy:
             except Exception as e:
                 logger.error(f"分析{stock.get('name', '')}({stock.get('ts_code', '')})时出错: {str(e)}")
                 continue
+                
         # 按收益率排序
         results.sort(key=lambda x: x['total_return'], reverse=True)
+        
         # 将结果保存为CSV
         if results:
             result_df = pd.DataFrame([{k: v for k, v in r.items() if k != 'data' and k != 'backtest_result'}
@@ -551,6 +695,7 @@ class MACrossStrategy:
             csv_path = os.path.join(RESULTS_DIR, f"ma_strategy_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
             result_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
             logger.info(f"已将策略结果保存至: {csv_path}")
+            
         return results
 # 运行测试
 if __name__ == "__main__":

@@ -50,6 +50,15 @@ class EnhancedGuiController(GuiController):
         # 替换标准动量分析器为增强版
         self.momentum_analyzer = EnhancedMomentumAnalyzer(use_tushare=True)
         self.cached_enhanced_results = None  # 缓存增强版分析结果
+        
+        # 添加数据获取器，用于获取市场数据
+        try:
+            from src.enhanced.data.fetchers.data_source_manager import DataSourceManager
+            self.data_fetcher = DataSourceManager()
+        except ImportError:
+            logger.warning("无法导入增强版数据源管理器，部分功能可能不可用")
+            self.data_fetcher = None
+            
         logger.info("增强版GUI控制器初始化完成")
         
     def get_enhanced_momentum_analysis(self, industry=None, sample_size=100, min_score=70):
@@ -324,16 +333,35 @@ class EnhancedGuiController(GuiController):
             logger.error(f"获取行业增强分析出错: {str(e)}")
             return []
             
-    def get_enhanced_market_overview(self):
+    def get_enhanced_market_overview(self, trade_date=None):
         """获取增强版市场概览
         
+        Args:
+            trade_date: 交易日期，默认为最新交易日
+            
         Returns:
             dict: 市场概览数据
         """
         try:
             logger.info("开始获取增强版市场概览")
             
-            # 获取主要指数数据
+            # 使用增强版市场概览模块
+            try:
+                from src.enhanced.market.enhanced_market_overview import EnhancedMarketOverview
+                market_overview = EnhancedMarketOverview()
+                overview_data = market_overview.get_market_overview(trade_date)
+                
+                # 如果成功获取数据，直接返回
+                if overview_data:
+                    logger.info("成功使用增强版市场概览模块获取数据")
+                    return overview_data
+                    
+            except ImportError:
+                logger.warning("未找到增强版市场概览模块，使用旧版获取数据")
+            except Exception as e:
+                logger.error(f"使用增强版市场概览模块出错: {str(e)}")
+            
+            # 使用原有方法获取市场概览数据
             market_data = {}
             
             # 指数列表
@@ -348,8 +376,18 @@ class EnhancedGuiController(GuiController):
             
             for idx in indices:
                 try:
-                    # 获取指数日线数据
-                    data = self.momentum_analyzer.get_index_daily_data(idx['code'])
+                    # 获取指数日线数据 - 首先尝试使用data_fetcher
+                    data = None
+                    if self.data_fetcher:
+                        try:
+                            data = self.data_fetcher.get_index_daily(idx['code'])
+                        except Exception as e:
+                            logger.warning(f"使用data_fetcher获取指数{idx['name']}数据失败: {str(e)}")
+                    
+                    # 如果data_fetcher获取失败，尝试使用momentum_analyzer
+                    if data is None or data.empty:
+                        data = self.momentum_analyzer.get_index_daily_data(idx['code'])
+                    
                     if not data.empty:
                         # 计算技术指标
                         data = self.momentum_analyzer.calculate_momentum(data)
@@ -409,7 +447,16 @@ class EnhancedGuiController(GuiController):
                     
                     for _, stock in sample.iterrows():
                         ts_code = stock['ts_code']
-                        data = self.momentum_analyzer.get_stock_daily_data(ts_code)
+                        # 尝试使用data_fetcher获取数据，如失败则使用momentum_analyzer
+                        data = None
+                        if self.data_fetcher:
+                            try:
+                                data = self.data_fetcher.get_daily_data(ts_code)
+                            except Exception:
+                                pass
+                        
+                        if data is None or data.empty:
+                            data = self.momentum_analyzer.get_stock_daily_data(ts_code)
                         
                         if not data.empty:
                             data = self.momentum_analyzer.calculate_momentum(data)

@@ -75,6 +75,42 @@ class EnhancedMomentumAnalyzer(MomentumAnalyzer):
             '通信': '000993.SH',  # 通信指数
             # 添加更多行业映射
         }
+    
+    def _cached_get_stock_data(self, ts_code, start_date, end_date, use_tushare):
+        """兼容旧版API的缓存数据获取方法"""
+        # 此方法是为了兼容旧的API调用，实际是调用新的get_stock_daily_data_cached方法
+        try:
+            # 如果父类中存在get_stock_daily_data_cached方法，则调用它
+            if hasattr(self, 'get_stock_daily_data_cached'):
+                return self.get_stock_daily_data_cached(ts_code, start_date, end_date, use_tushare)
+            
+            # 否则执行原始逻辑
+            if use_tushare:
+                try:
+                    # 从Tushare获取日线数据
+                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    if df.empty:
+                        # 尝试使用备用API
+                        df = ts.pro_bar(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    if not df.empty:
+                        # 确保日期列为索引并按日期排序
+                        if 'trade_date' in df.columns:
+                            df['trade_date'] = pd.to_datetime(df['trade_date'])
+                            df.sort_values('trade_date', inplace=True)
+                            df.set_index('trade_date', inplace=True)
+                        return df
+                    else:
+                        logger.warning(f"获取{ts_code}的日线数据为空")
+                        return self._get_local_stock_data(ts_code, start_date, end_date)
+                except Exception as e:
+                    logger.error(f"从Tushare获取{ts_code}的日线数据失败: {str(e)}")
+                    return self._get_local_stock_data(ts_code, start_date, end_date)
+            else:
+                return self._get_local_stock_data(ts_code, start_date, end_date)
+        except Exception as e:
+            logger.error(f"兼容方法调用失败: {str(e)}")
+            # 出错时返回空DataFrame
+            return pd.DataFrame()
         
     def _get_cached_data_with_timeout(self, key):
         """获取带有有效期的缓存数据"""
