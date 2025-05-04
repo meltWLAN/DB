@@ -84,6 +84,28 @@ class GuiController:
         self.ma_results = None
         self.combined_results = None
         self.financial_results = None
+        
+        # 添加数据获取器
+        try:
+            # 尝试使用增强版数据源管理器
+            try:
+                from src.enhanced.data.fetchers.data_source_manager import DataSourceManager
+                self.data_fetcher = DataSourceManager()
+                logger.info("成功初始化增强版数据源管理器")
+            except ImportError:
+                # 如果增强版不可用，尝试使用基础版数据获取器
+                self.data_fetcher = None
+                if use_tushare:
+                    try:
+                        from data_fetcher import TushareDataFetcher
+                        self.data_fetcher = TushareDataFetcher()
+                        logger.info("成功初始化基础版TuShare数据获取器")
+                    except Exception as e:
+                        logger.warning(f"初始化数据获取器失败: {str(e)}")
+        except Exception as e:
+            logger.warning(f"初始化数据获取器失败: {str(e)}")
+            self.data_fetcher = None
+        
         # 确保目录存在
         os.makedirs(LOG_DIR, exist_ok=True)
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -190,245 +212,63 @@ class GuiController:
                 gui_callback("状态", f"启动均线交叉策略失败: {str(e)}")
             return None
     def get_market_overview(self, gui_callback=None):
-        """获取市场概览信息"""
+        """获取市场概览数据
+        
+        Args:
+            gui_callback: 回调函数，用于向GUI更新状态
+            
+        Returns:
+            dict: 市场概览数据，包括指数、行业、热点等
+        """
         try:
             if gui_callback:
                 gui_callback("状态", "正在获取市场概览数据...")
-            
-            # 尝试从数据源管理器获取真实市场数据
+                
+            # 导入市场概览模块和适配器
             try:
-                from src.enhanced.data.fetchers.data_source_manager import DataSourceManager
-                data_manager = DataSourceManager()
+                # 首先尝试导入市场概览适配器和Tushare数据模块
+                from market_overview_adapter import adapt_market_overview
                 
-                # 获取当前交易日期
-                latest_trade_date = data_manager.get_latest_trading_date()
+                # 获取市场概览数据 (adapter内部会从Tushare获取)
+                overview_data = adapt_market_overview(None)  # 传入None让适配器主动获取数据
                 
-                # 获取市场概览基础数据
-                market_data = data_manager.get_market_overview(latest_trade_date)
-                if not market_data:
-                    raise ValueError("无法获取市场概览数据")
-                
-                # 获取指数数据
-                indices_data = []
-                index_codes = ["000001.SH", "399001.SZ", "399006.SZ", "000016.SH", "000300.SH", "000905.SH"]
-                index_names = ["上证指数", "深证成指", "创业板指", "上证50", "沪深300", "中证500"]
-                
-                for i, code in enumerate(index_codes):
-                    try:
-                        # 获取最近5个交易日的指数数据以计算趋势
-                        prev_date = data_manager.get_previous_trading_date(latest_trade_date, 5)
-                        index_df = data_manager.get_stock_index_data(code, prev_date, latest_trade_date)
-                        
-                        if index_df is not None and not index_df.empty:
-                            # 获取最新行情
-                            latest_data = index_df.iloc[-1]
-                            
-                            # 计算5日涨跌幅
-                            change_5d = ((latest_data['close'] / index_df.iloc[0]['close']) - 1) * 100 if len(index_df) > 1 else 0
-                            
-                            # 计算量比（当日成交量/5日平均成交量）
-                            volume_ratio = latest_data['volume'] / index_df['volume'].mean() if 'volume' in index_df.columns else 1
-                            
-                            indices_data.append({
-                                "name": index_names[i],
-                                "code": code,
-                                "close": latest_data['close'],
-                                "change": ((latest_data['close'] / latest_data['open']) - 1) * 100 if 'open' in latest_data else 0,
-                                "change_5d": change_5d,
-                                "volume": latest_data['volume'] if 'volume' in latest_data else 0,
-                                "amount": latest_data['amount'] if 'amount' in latest_data else 0,
-                                "volume_ratio": volume_ratio,
-                                "trend": self._analyze_trend(index_df) if hasattr(self, '_analyze_trend') else "中性"
-                            })
-                    except Exception as e:
-                        logger.error(f"获取指数 {code} 数据失败: {str(e)}")
-                        # 添加一个基本的占位数据
-                        indices_data.append({
-                            "name": index_names[i],
-                            "code": code,
-                            "close": 0,
-                            "change": 0,
-                            "change_5d": 0,
-                            "volume": 0,
-                            "amount": 0,
-                            "volume_ratio": 0,
-                            "trend": "中性"
-                        })
-                
-                # 获取行业表现数据
-                industry_performance = data_manager.get_industry_performance(latest_trade_date)
-                industries_data = []
-                
-                if industry_performance is not None and not industry_performance.empty:
-                    for _, row in industry_performance.iterrows():
-                        industry_code = row.get('industry_code', '')
-                        industry_name = row.get('industry_name', '')
-                        change = row.get('change_pct', 0)
-                        
-                        # 获取行业成分股
-                        try:
-                            industry_stocks = data_manager.get_industry_stocks(industry_code)
-                            if industry_stocks is not None and not industry_stocks.empty:
-                                # 按涨跌幅排序
-                                industry_stocks_data = []
-                                for _, stock in industry_stocks.iterrows():
-                                    stock_code = stock.get('ts_code', '')
-                                    stock_data = data_manager.get_daily_data(stock_code, 
-                                                                            data_manager.get_previous_trading_date(latest_trade_date, 1), 
-                                                                            latest_trade_date)
-                                    if stock_data is not None and not stock_data.empty:
-                                        change_pct = ((stock_data.iloc[-1]['close'] / stock_data.iloc[-1]['open']) - 1) * 100
-                                        industry_stocks_data.append({
-                                            'code': stock_code,
-                                            'name': stock.get('name', ''),
-                                            'change_pct': change_pct
-                                        })
-                                
-                                # 按涨跌幅排序
-                                industry_stocks_data.sort(key=lambda x: x['change_pct'], reverse=True)
-                                
-                                # 找出领涨股和领跌股
-                                leading_up = industry_stocks_data[0] if industry_stocks_data else {'name': '', 'change_pct': 0}
-                                leading_down = industry_stocks_data[-1] if industry_stocks_data else {'name': '', 'change_pct': 0}
-                                
-                                # 计算上涨和下跌股票数量
-                                up_count = sum(1 for stock in industry_stocks_data if stock['change_pct'] > 0)
-                                down_count = sum(1 for stock in industry_stocks_data if stock['change_pct'] < 0)
-                                
-                                industries_data.append({
-                                    'name': industry_name,
-                                    'code': industry_code,
-                                    'change': change,
-                                    'up_count': up_count,
-                                    'down_count': down_count,
-                                    'total_count': len(industry_stocks_data),
-                                    'leading_up': leading_up['name'],
-                                    'leading_up_change': leading_up['change_pct'],
-                                    'leading_down': leading_down['name'],
-                                    'leading_down_change': leading_down['change_pct'],
-                                    'strength_index': self._calculate_industry_strength(up_count, down_count, change) if hasattr(self, '_calculate_industry_strength') else 50
-                                })
-                        except Exception as e:
-                            logger.error(f"处理行业 {industry_name} 数据失败: {str(e)}")
-                
-                # 按行业强度指数排序
-                industries_data.sort(key=lambda x: x.get('strength_index', 0), reverse=True)
-                
-                # 提取热门板块数据（强度指数最高的几个行业）
-                hot_sectors = industries_data[:7] if len(industries_data) >= 7 else industries_data
-                
-                # 分析市场情绪和预测未来热门板块 
-                market_sentiment = self._analyze_market_sentiment(market_data, indices_data)
-                future_hot_sectors = self._predict_future_hot_sectors(industries_data, market_sentiment)
-                
-                # 构建市场概览数据
-                overview_data = {
-                    "date": latest_trade_date,
-                    "indices": indices_data,
-                    "market_stats": {
-                        "total_turnover": market_data.get('total_amount', 0),
-                        "up_count": market_data.get('up_count', 0), 
-                        "down_count": market_data.get('down_count', 0),
-                        "flat_count": market_data.get('flat_count', 0),
-                        "limit_up_count": market_data.get('limit_up_count', 0),
-                        "limit_down_count": market_data.get('limit_down_count', 0),
-                        "turnover_rate": market_data.get('turnover_rate', 0),
-                        "market_sentiment": market_sentiment
-                    },
-                    "industry_performance": industries_data,
-                    "hot_sectors": [{
-                        "name": sector.get('name', ''),
-                        "change": sector.get('change', 0),
-                        "turnover": sector.get('turnover', 0),  # 这个数据可能需要额外获取 
-                        "up_count": sector.get('up_count', 0),
-                        "down_count": sector.get('down_count', 0),
-                        "leading_stock": sector.get('leading_up', '')
-                    } for sector in hot_sectors],
-                    "future_hot_sectors": future_hot_sectors
-                }
-                
-                if gui_callback:
-                    gui_callback("状态", "市场概览数据获取完成")
-                    gui_callback("结果", overview_data)
-                return overview_data
-            except Exception as api_error:
-                logger.error(f"尝试获取真实市场数据失败，使用模拟数据: {str(api_error)}")
-                if gui_callback:
-                    gui_callback("状态", "无法获取实时市场数据，使用模拟数据")
-                
-                # 使用模拟数据
-                from datetime import datetime
-                today = datetime.now().strftime('%Y-%m-%d')
-                
-                # 模拟指数数据
-                indices_data = [
-                    {"name": "上证指数", "code": "000001.SH", "close": 3150.78, "change": 0.85, "change_5d": 2.15, "volume": 1200000000, "amount": 1500000000, "volume_ratio": 1.02, "trend": "上涨"},
-                    {"name": "深证成指", "code": "399001.SZ", "close": 10230.56, "change": 1.05, "change_5d": 2.85, "volume": 1000000000, "amount": 1200000000, "volume_ratio": 1.08, "trend": "上涨"},
-                    {"name": "创业板指", "code": "399006.SZ", "close": 2180.45, "change": 1.25, "change_5d": 3.25, "volume": 800000000, "amount": 950000000, "volume_ratio": 1.15, "trend": "强势上涨"},
-                    {"name": "上证50", "code": "000016.SH", "close": 3050.67, "change": 0.65, "change_5d": 1.85, "volume": 500000000, "amount": 750000000, "volume_ratio": 0.95, "trend": "震荡"},
-                    {"name": "沪深300", "code": "000300.SH", "close": 4120.34, "change": 0.75, "change_5d": 2.05, "volume": 650000000, "amount": 900000000, "volume_ratio": 1.05, "trend": "上涨"},
-                    {"name": "中证500", "code": "000905.SH", "close": 6680.12, "change": 0.90, "change_5d": 2.35, "volume": 750000000, "amount": 850000000, "volume_ratio": 1.10, "trend": "上涨"}
-                ]
-                
-                # 模拟行业数据
-                industries_data = [
-                    {"name": "电子", "code": "ELE", "change": 1.75, "up_count": 58, "down_count": 25, "total_count": 90, "leading_up": "科大讯飞", "leading_up_change": 5.63, "leading_down": "华工科技", "leading_down_change": -2.41, "strength_index": 85},
-                    {"name": "医疗健康", "code": "MED", "change": 1.25, "up_count": 65, "down_count": 30, "total_count": 100, "leading_up": "迈瑞医疗", "leading_up_change": 4.21, "leading_down": "通策医疗", "leading_down_change": -1.85, "strength_index": 80},
-                    {"name": "半导体", "code": "SEM", "change": 1.95, "up_count": 42, "down_count": 15, "total_count": 60, "leading_up": "中芯国际", "leading_up_change": 6.37, "leading_down": "北方华创", "leading_down_change": -1.28, "strength_index": 90},
-                    {"name": "新能源", "code": "NER", "change": 1.45, "up_count": 72, "down_count": 28, "total_count": 105, "leading_up": "宁德时代", "leading_up_change": 3.97, "leading_down": "亿纬锂能", "leading_down_change": -2.05, "strength_index": 82},
-                    {"name": "计算机", "code": "COM", "change": 1.15, "up_count": 48, "down_count": 32, "total_count": 85, "leading_up": "浪潮信息", "leading_up_change": 3.82, "leading_down": "用友网络", "leading_down_change": -1.79, "strength_index": 75},
-                    {"name": "消费", "code": "CON", "change": 0.95, "up_count": 52, "down_count": 38, "total_count": 95, "leading_up": "贵州茅台", "leading_up_change": 2.84, "leading_down": "伊利股份", "leading_down_change": -1.63, "strength_index": 70},
-                    {"name": "金融", "code": "FIN", "change": 0.65, "up_count": 35, "down_count": 25, "total_count": 65, "leading_up": "招商银行", "leading_up_change": 2.15, "leading_down": "中国平安", "leading_down_change": -1.42, "strength_index": 65},
-                    {"name": "有色金属", "code": "MET", "change": 1.35, "up_count": 45, "down_count": 30, "total_count": 80, "leading_up": "紫金矿业", "leading_up_change": 4.52, "leading_down": "洛阳钼业", "leading_down_change": -1.95, "strength_index": 77}
-                ]
-                
-                # 模拟热门板块
-                hot_sectors = [
-                    {"name": "半导体", "change": 1.95, "turnover": 85.2, "up_count": 42, "down_count": 15, "leading_stock": "中芯国际"},
-                    {"name": "电子", "change": 1.75, "turnover": 92.5, "up_count": 58, "down_count": 25, "leading_stock": "科大讯飞"},
-                    {"name": "新能源", "change": 1.45, "turnover": 105.8, "up_count": 72, "down_count": 28, "leading_stock": "宁德时代"},
-                    {"name": "医疗健康", "change": 1.25, "turnover": 78.3, "up_count": 65, "down_count": 30, "leading_stock": "迈瑞医疗"},
-                    {"name": "有色金属", "change": 1.35, "turnover": 68.9, "up_count": 45, "down_count": 30, "leading_stock": "紫金矿业"},
-                    {"name": "计算机", "change": 1.15, "turnover": 72.4, "up_count": 48, "down_count": 32, "leading_stock": "浪潮信息"},
-                    {"name": "消费", "change": 0.95, "turnover": 89.7, "up_count": 52, "down_count": 38, "leading_stock": "贵州茅台"}
-                ]
-                
-                # 模拟未来热门板块预测
-                future_hot_sectors = [
-                    {"name": "半导体", "predicted_change": 3.5, "attention_index": 92, "fund_inflow": 15.8, "growth_score": 95, "recommendation": "强势行业,主力资金持续流入,中芯国际等龙头表现优异"},
-                    {"name": "人工智能", "predicted_change": 3.2, "attention_index": 90, "fund_inflow": 14.5, "growth_score": 93, "recommendation": "行业基本面向好,整体趋势向上,关注度提升"},
-                    {"name": "新能源", "predicted_change": 2.8, "attention_index": 88, "fund_inflow": 13.2, "growth_score": 91, "recommendation": "行业处于成长期,中长期向好"},
-                    {"name": "医疗器械", "predicted_change": 2.5, "attention_index": 85, "fund_inflow": 12.7, "growth_score": 88, "recommendation": "防御性较强,估值处于合理区间"},
-                    {"name": "云计算", "predicted_change": 2.3, "attention_index": 82, "fund_inflow": 11.8, "growth_score": 86, "recommendation": "数字经济发展核心,成长确定性高"}
-                ]
-                
-                # 市场情绪
-                market_sentiment = "偏乐观"
-                
-                # 构建模拟的市场概览数据
-                overview_data = {
-                    "date": today,
-                    "indices": indices_data,
-                    "market_stats": {
-                        "total_turnover": 7850000000000,
-                        "up_count": 2150, 
-                        "down_count": 1450,
-                        "flat_count": 250,
-                        "limit_up_count": 35,
-                        "limit_down_count": 8,
-                        "turnover_rate": 1.85,
-                        "market_sentiment": market_sentiment
-                    },
-                    "industry_performance": industries_data,
-                    "hot_sectors": hot_sectors,
-                    "future_hot_sectors": future_hot_sectors
-                }
-                
-                if gui_callback:
-                    gui_callback("状态", "使用模拟数据完成市场概览")
-                    gui_callback("结果", overview_data)
-                return overview_data
-                
+                if overview_data and isinstance(overview_data, dict) and len(overview_data) > 0:
+                    if gui_callback:
+                        gui_callback("状态", "市场概览数据获取完成")
+                        gui_callback("结果", overview_data)
+                    return overview_data
+                else:
+                    if gui_callback:
+                        gui_callback("状态", "未能获取市场概览数据，请检查网络连接或数据源配置")
+                    
+                    # 返回空的数据结构
+                    empty_data = {
+                        "date": datetime.now().strftime('%Y-%m-%d'),
+                        "indices": [],
+                        "market_stats": {
+                            "up_count": 0, 
+                            "down_count": 0,
+                            "flat_count": 0,
+                            "limit_up_count": 0,
+                            "limit_down_count": 0,
+                            "total_turnover": 0,
+                            "turnover_rate": 0,
+                            "market_sentiment": "未知"
+                        },
+                        "industry_performance": [],
+                        "hot_sectors": [],
+                        "future_hot_sectors": []
+                    }
+                    
+                    if gui_callback:
+                        gui_callback("结果", empty_data)
+                    return empty_data
+            except ImportError as ie:
+                logger.warning(f"导入市场概览模块失败: {str(ie)}")
+                raise
+            except Exception as e:
+                logger.warning(f"获取市场概览数据失败: {str(e)}")
+                raise
         except Exception as e:
             logger.error(f"获取市场概览失败: {str(e)}")
             if gui_callback:
@@ -980,7 +820,7 @@ class GuiController:
                     'strength': industry.get('strength_index', 0),
                     'up_ratio': industry.get('up_count', 0) / max(1, industry.get('total_count', 1)),
                     'change': industry.get('change', 0),
-                    'leading_stock': industry.get('leading_up', '')
+                    'leading_stock': industry.get('leading_up', {}).get('name', '')
                 })
             
             # 按得分排序
