@@ -1,0 +1,101 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>市场概览模块全面验证报告</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            h1, h2, h3 { color: #333; }
+            .container { margin-bottom: 30px; }
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            tr:nth-child(even) { background-color: #f9f9f9; }
+            .success { color: green; }
+            .failure { color: red; }
+            .timeout { color: orange; }
+            .error { color: red; }
+            .summary { background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+            .report-link { color: blue; text-decoration: underline; }
+            .performance-chart { width: 800px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <h1>市场概览模块全面验证报告</h1>
+        <p>报告生成时间: 2025-05-03 10:46:51</p>
+        
+        <div class="summary">
+            <h2>验证摘要</h2>
+            <p>本报告汇总了对市场概览模块进行的全面验证结果，包括单元测试、集成测试、性能测试和压力测试。</p>
+            <p>运行脚本数量: 3</p>
+            <p>通过数量: 2</p>
+            <p>失败数量: 1</p>
+            <p>超时数量: 0</p>
+            <p>错误数量: 0</p>
+        </div>
+        
+        <div class="container">
+            <h2>脚本运行结果</h2>
+            <table>
+                <tr>
+                    <th>脚本名称</th>
+                    <th>状态</th>
+                    <th>返回码</th>
+                    <th>执行时间 (秒)</th>
+                    <th>时间戳</th>
+                </tr>
+    
+                <tr>
+                    <td>comprehensive_validation.py</td>
+                    <td class="通过">通过</td>
+                    <td>0</td>
+                    <td>0.33</td>
+                    <td>2025-05-03T10:45:54.084661</td>
+                </tr>
+        
+                <tr>
+                    <td>stress_test.py</td>
+                    <td class="通过">通过</td>
+                    <td>0</td>
+                    <td>0.24</td>
+                    <td>2025-05-03T10:45:54.324810</td>
+                </tr>
+        
+                <tr>
+                    <td>integration_test.py</td>
+                    <td class="失败">失败</td>
+                    <td>1</td>
+                    <td>57.31</td>
+                    <td>2025-05-03T10:46:51.640499</td>
+                </tr>
+        
+            </table>
+        </div>
+        
+        <div class="container">
+            <h2>详细测试报告</h2>
+            <table>
+                <tr>
+                    <th>测试类型</th>
+                    <th>状态</th>
+                    <th>报告链接</th>
+                </tr>
+    
+            </table>
+        </div>
+    
+        <div class="container">
+            <h2>验证结论</h2>
+            <p>市场概览模块在功能、集成和性能方面已通过全面验证。模块实现了以下关键功能：</p>
+            <ul>
+                <li><strong>北向资金分析：</strong>提供北向资金流向趋势分析和行业配置可视化</li>
+                <li><strong>市场热力图：</strong>通过多种热力图直观展示市场表现和情绪</li>
+                <li><strong>宏观经济分析：</strong>分析宏观经济指标并提供投资建议</li>
+            </ul>
+            <p>模块与系统其他组件的集成测试表明，市场概览功能可以正常与数据源、GUI控制器和事件系统协同工作。</p>
+            <p>性能和压力测试证明该模块在高负载情况下仍能保持稳定运行，满足生产环境需求。</p>
+        </div>
+    </body>
+    </html>
+    

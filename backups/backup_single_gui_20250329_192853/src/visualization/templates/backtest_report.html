@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            margin: 0; 
+            padding: 0;
+            background-color: #f8f9fa;
+            color: #333;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background-color: #fff;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        .header { 
+            background-color: #673ab7;
+            color: white;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 30px; 
+            border-radius: 5px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .meta-info {
+            font-size: 14px;
+            margin-top: 5px;
+            opacity: 0.9;
+        }
+        h1, h2, h3 { 
+            color: #673ab7; 
+            margin-top: 30px;
+        }
+        h2 {
+            border-bottom: 2px solid #eaecef;
+            padding-bottom: 10px;
+        }
+        .summary { 
+            margin-bottom: 30px;
+            background-color: #f5f5f5;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .chart { 
+            margin: 30px 0; 
+            text-align: center;
+            background-color: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+        }
+        .chart img { 
+            max-width: 100%; 
+            border-radius: 5px;
+        }
+        table { 
+            border-collapse: collapse; 
+            width: 100%; 
+            margin-bottom: 20px; 
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        th, td { 
+            padding: 12px; 
+            text-align: left; 
+        }
+        th { 
+            background-color: #673ab7; 
+            color: white;
+            font-weight: 500;
+        }
+        td {
+            border-bottom: 1px solid #eee;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        
+        .footer { 
+            margin-top: 50px; 
+            text-align: center; 
+            color: #777; 
+            font-size: 0.8em;
+            padding: 20px;
+            border-top: 1px solid #eee;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .metric-card {
+            background-color: #fff;
+            border-radius: 5px;
+            padding: 15px;
+            text-align: center;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+        }
+        
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        
+        .metric-label {
+            color: #777;
+            font-size: 14px;
+        }
+        
+        .positive { color: #4caf50; }
+        .negative { color: #f44336; }
+        .neutral { color: #ff9800; }
+        
+        .buy { color: #4caf50; font-weight: bold; }
+        .sell { color: #f44336; font-weight: bold; }
+        .hold { color: #ff9800; font-weight: bold; }
+        
+        .tab-container {
+            margin: 30px 0;
+        }
+        
+        .tab-buttons {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .tab-button {
+            padding: 10px 20px;
+            background-color: #f1f1f1;
+            border: none;
+            cursor: pointer;
+            margin-right: 2px;
+        }
+        
+        .tab-button.active {
+            background-color: #673ab7;
+            color: white;
+        }
+        
+        .tab-content {
+            display: none;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-top: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .trades-positive {
+            color: #4caf50;
+        }
+        
+        .trades-negative {
+            color: #f44336;
+        }
+    </style>
+    <script>
+        function openTab(evt, tabName) {
+            // Hide all tab content
+            var tabcontent = document.getElementsByClassName("tab-content");
+            for (var i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+                tabcontent[i].className = tabcontent[i].className.replace(" active", "");
+            }
+            
+            // Remove "active" class from all tab buttons
+            var tablinks = document.getElementsByClassName("tab-button");
+            for (var i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            
+            // Show the current tab and add "active" class to the button
+            document.getElementById(tabName).style.display = "block";
+            document.getElementById(tabName).className += " active";
+            evt.currentTarget.className += " active";
+        }
+        
+        window.onload = function() {
+            // Open the first tab by default
+            document.getElementsByClassName("tab-button")[0].click();
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ title }}</h1>
+            <div class="meta-info">生成时间: {{ creation_time }}</div>
+        </div>
+        
+        <div class="summary">
+            <h2>策略信息</h2>
+            <table>
+                <tr>
+                    <th>策略名称</th>
+                    <td>{{ strategy_info.name }}</td>
+                    <th>回测周期</th>
+                    <td>{{ strategy_info.period }}</td>
+                </tr>
+                <tr>
+                    <th>初始资金</th>
+                    <td>{{ strategy_info.initial_capital }}</td>
+                    <th>最终资金</th>
+                    <td>{{ strategy_info.final_capital }}</td>
+                </tr>
+                {% if strategy_info.description %}
+                <tr>
+                    <th>策略描述</th>
+                    <td colspan="3">{{ strategy_info.description }}</td>
+                </tr>
+                {% endif %}
+            </table>
+        </div>
+        
+        <div class="tab-container">
+            <div class="tab-buttons">
+                <button class="tab-button" onclick="openTab(event, 'performance-tab')" id="defaultOpen">策略表现</button>
+                <button class="tab-button" onclick="openTab(event, 'metrics-tab')">性能指标</button>
+                <button class="tab-button" onclick="openTab(event, 'trades-tab')">交易记录</button>
+                {% if strategy_info.parameters %}
+                <button class="tab-button" onclick="openTab(event, 'parameters-tab')">参数设置</button>
+                {% endif %}
+            </div>
+            
+            <div id="performance-tab" class="tab-content">
+                <h2>策略表现</h2>
+                <div class="chart">
+                    <img src="{{ chart_path }}" alt="策略表现图">
+                </div>
+                
+                <h3>关键表现指标</h3>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">总收益率</div>
+                        <div class="metric-value {% if performance.total_return > 0 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.total_return * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">年化收益率</div>
+                        <div class="metric-value {% if performance.annual_return > 0 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.annual_return * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">最大回撤</div>
+                        <div class="metric-value negative">
+                            {{ "%.2f"|format(performance.max_drawdown * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">夏普比率</div>
+                        <div class="metric-value {% if performance.sharpe_ratio > 1 %}positive{% elif performance.sharpe_ratio > 0 %}neutral{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.sharpe_ratio) }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="metrics-tab" class="tab-content">
+                <h2>详细性能指标</h2>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">总收益率</div>
+                        <div class="metric-value {% if performance.total_return > 0 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.total_return * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">年化收益率</div>
+                        <div class="metric-value {% if performance.annual_return > 0 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.annual_return * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">最大回撤</div>
+                        <div class="metric-value negative">
+                            {{ "%.2f"|format(performance.max_drawdown * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">夏普比率</div>
+                        <div class="metric-value {% if performance.sharpe_ratio > 1 %}positive{% elif performance.sharpe_ratio > 0 %}neutral{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.sharpe_ratio) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">索提诺比率</div>
+                        <div class="metric-value {% if performance.sortino_ratio > 1 %}positive{% elif performance.sortino_ratio > 0 %}neutral{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.sortino_ratio) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">信息比率</div>
+                        <div class="metric-value {% if performance.information_ratio > 0.5 %}positive{% elif performance.information_ratio > 0 %}neutral{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.information_ratio) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Beta</div>
+                        <div class="metric-value">
+                            {{ "%.2f"|format(performance.beta) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Alpha</div>
+                        <div class="metric-value {% if performance.alpha > 0 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(performance.alpha) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">波动率</div>
+                        <div class="metric-value">
+                            {{ "%.2f"|format(performance.volatility * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">胜率</div>
+                        <div class="metric-value">
+                            {{ "%.2f"|format(performance.win_rate * 100) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">盈亏比</div>
+                        <div class="metric-value">
+                            {{ "%.2f"|format(performance.profit_factor) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">交易次数</div>
+                        <div class="metric-value">
+                            {{ performance.trade_count }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="trades-tab" class="tab-content">
+                <h2>交易记录</h2>
+                <table>
+                    <tr>
+                        <th>交易ID</th>
+                        <th>股票</th>
+                        <th>方向</th>
+                        <th>开仓日期</th>
+                        <th>开仓价格</th>
+                        <th>平仓日期</th>
+                        <th>平仓价格</th>
+                        <th>持有天数</th>
+                        <th>收益率</th>
+                    </tr>
+                    {% for trade in trades %}
+                    <tr>
+                        <td>{{ trade.id if trade.id else loop.index }}</td>
+                        <td>{{ trade.symbol }}</td>
+                        <td>{{ trade.direction }}</td>
+                        <td>{{ trade.entry_date }}</td>
+                        <td>{{ "%.2f"|format(trade.entry_price) }}</td>
+                        <td>{{ trade.exit_date }}</td>
+                        <td>{{ "%.2f"|format(trade.exit_price) }}</td>
+                        <td>{{ trade.holding_days if trade.holding_days else "" }}</td>
+                        <td class="{% if trade.return > 0 %}trades-positive{% elif trade.return < 0 %}trades-negative{% endif %}">
+                            {{ "%.2f"|format(trade.return * 100) }}%
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            
+            {% if strategy_info.parameters %}
+            <div id="parameters-tab" class="tab-content">
+                <h2>策略参数</h2>
+                <table>
+                    <tr>
+                        <th>参数名称</th>
+                        <th>参数值</th>
+                        <th>描述</th>
+                    </tr>
+                    {% for name, param in strategy_info.parameters.items() %}
+                    <tr>
+                        <td>{{ name }}</td>
+                        <td>{{ param.value }}</td>
+                        <td>{{ param.description if param.description else "" }}</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+            {% endif %}
+        </div>
+        
+        <div class="footer">
+            <p>本报告由股票推荐系统回测引擎自动生成，仅供参考，不构成投资建议。投资有风险，入市需谨慎。</p>
+        </div>
+    </div>
+</body>
+</html> 

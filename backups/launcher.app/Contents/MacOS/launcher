@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# 获取脚本所在目录的上级目录的上级目录（即.app包的父目录）
+APP_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
+PARENT_DIR="$(dirname "$APP_DIR")"
+cd "$PARENT_DIR"
+
+# 在完全隔离的环境中启动应用
+exec -c /usr/bin/env -i \
+  HOME="$HOME" \
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin" \
+  /usr/bin/python3 "$PARENT_DIR/stock_analysis_gui.py" 

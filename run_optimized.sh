@@ -32,4 +32,13 @@ echo "检测到 $(($CPU_COUNT+1)) 个CPU核心，将使用 $CPU_COUNT 个工作�
 
 # 启动优化版本GUI
 echo "正在启动优化版本界面..."
+# 应用动量分析模块修复
+echo "正在应用动量分析模块修复..."
+if [ -f patches/momentum_fix_complete.py ]; then
+    export PYTHONPATH="$PYTHONPATH:$SCRIPT_DIR/patches"
+    echo "动量分析模块修复已应用"
+else
+    echo "警告: 未找到动量分析模块修复文件"
+fi
+
 $PYTHON stock_analysis_gui.py --use-optimized --workers $CPU_COUNT

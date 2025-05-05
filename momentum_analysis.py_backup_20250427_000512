@@ -1,0 +1,863 @@
+"""
+动量分析模块
+提供股票动量分析的相关功能，包括技术指标计算、筛选和评分
+"""
+import os
+import sys
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as pl
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+import tushare as ts
+import warnings
+warnings.filterwarnings('ignore')
+# 确保当前目录在Python路径中
+current_dir = Path(__file__).parent
+if str(current_dir) not in sys.path:
+    sys.path.append(str(current_dir))
+# 导入项目配置
+try:
+    from src.enhanced.config.settings import TUSHARE_TOKEN, LOG_DIR, DATA_DIR, RESULTS_DIR
+except ImportError:
+    # 设置默认配置
+    TUSHARE_TOKEN = ""
+    LOG_DIR = "./logs"
+    DATA_DIR = "./data"
+    RESULTS_DIR = "./results"
+# 确保目录存在
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(os.path.join(RESULTS_DIR, "charts"), exist_ok=True)
+# 配置日志
+logger = logging.getLogger(__name__)
+# 设置Tushare
+if not TUSHARE_TOKEN:
+    # 直接在代码中设置Token（如果配置文件中没有设置）
+    TUSHARE_TOKEN = "0e65a5c636112dc9d9af5ccc93ef06c55987805b9467db0866185a10"
+if TUSHARE_TOKEN:
+    ts.set_token(TUSHARE_TOKEN)
+    pro = ts.pro_api()
+else:
+    pro = None
+class MomentumAnalyzer:
+    """动量分析器类，提供动量分析相关功能"""
+    def __init__(self, use_tushare=True, lookback_period=60, use_parallel=True, cache_limit=128):
+        """初始化动量分析器
+        
+        Args:
+            use_tushare: 是否使用Tushare API
+            lookback_period: 回溯分析期限，默认60天
+            use_parallel: 是否使用并行处理
+            cache_limit: 缓存数据条目限制
+        """
+        # 基本设置
+        self.use_tushare = use_tushare
+        if use_tushare and not TUSHARE_TOKEN:
+            logger.warning("未设置Tushare Token，将使用本地数据")
+            self.use_tushare = False
+        self.lookback_period = lookback_period
+        self.use_parallel = use_parallel
+        self.data_cache = {}  # 数据缓存
+        self._cache_keys = []  # 缓存键列表，用于LRU缓存管理
+        self._cache_limit = cache_limit  # 缓存大小限制
+        
+        # 设置日期范围
+        end_date = datetime.now().strftime('%Y%m%d')
+        days_ago = 365  # 默认获取一年的数据
+        start_date = (datetime.now() - timedelta(days=days_ago)).strftime('%Y%m%d')
+        self.start_date = start_date
+        self.end_date = end_date
+        
+        # 设置logger
+        self.logger = logger
+        
+        # 自定义分析阈值和参数
+        self.momentum_thresholds = {
+            'short': 5,     # 短期动量周期
+            'medium': 20,   # 中期动量周期
+            'long': 60      # 长期动量周期
+        }
+        
+        # 配置不同指标的权重
+        self.indicator_weights = {
+            'ma_score': 0.15,       # 移动平均线权重
+            'momentum_score': 0.25, # 价格动量权重
+            'rsi_score': 0.15,      # RSI权重
+            'macd_score': 0.15,     # MACD权重
+            'kdj_score': 0.15,      # KDJ权重
+            'volume_score': 0.10,   # 成交量权重
+            'price_pattern': 0.05   # 价格形态权重
+        }
+        
+        # 初始化并行处理池
+        self._init_parallel_pool()
+    
+    def _init_parallel_pool(self):
+        """初始化并行处理池"""
+        if self.use_parallel:
+            try:
+                import multiprocessing as mp
+                self.pool = mp.Pool(processes=max(1, mp.cpu_count() - 1))
+            except ImportError:
+                logger.warning("无法导入multiprocessing模块，将禁用并行处理")
+                self.use_parallel = False
+    
+    def _get_cached_data(self, key):
+        """从缓存获取数据"""
+        if key in self.data_cache:
+            # 更新缓存访问顺序
+            self._cache_keys.remove(key)
+            self._cache_keys.append(key)
+            return self.data_cache[key]
+        return None
+    
+    def _set_cached_data(self, key, data):
+        """将数据存入缓存"""
+        # 如果缓存满了，移除最久未使用的条目
+        if len(self._cache_keys) >= self._cache_limit and self._cache_keys:
+            oldest_key = self._cache_keys.pop(0)
+            if oldest_key in self.data_cache:
+                del self.data_cache[oldest_key]
+        
+        # 添加新条目
+        if key not in self.data_cache:
+            self._cache_keys.append(key)
+        self.data_cache[key] = data
+        return data
+
+    def get_stock_list(self, industry=None):
+        """获取股票列表，可按行业筛选"""
+        # 热门板块和对应的关键词映射
+        hot_sectors_keywords = {
+            "人工智能": ["人工智能", "智能", "AI", "机器学习", "语音识别", "计算机", "软件", "科大讯飞"],
+            "半导体芯片": ["半导体", "芯片", "集成电路", "电子", "中芯国际"],
+            "新能源汽车": ["新能源", "汽车", "电动", "锂电池", "充电桩"],
+            "医疗器械": ["医疗", "器械", "医药", "设备"],
+            "云计算": ["云计算", "云服务", "互联网", "数据中心", "计算机"],
+            "5G通信": ["5G", "通信", "移动", "电信", "基站"],
+            "生物医药": ["生物", "医药", "制药", "基因", "疫苗"]
+        }
+        
+        if self.use_tushare:
+            try:
+                # 获取所有股票列表
+                stocks = pro.stock_basic(exchange='', list_status='L',
+                                         fields='ts_code,symbol,name,area,industry,list_date')
+                
+                # 行业筛选
+                if industry and industry != "全部":
+                    # 检查是否为自定义热门板块
+                    if industry in hot_sectors_keywords:
+                        # 对于热门板块，使用关键词匹配
+                        keywords = hot_sectors_keywords[industry]
+                        mask = pd.Series(False, index=stocks.index)
+                        
+                        # 匹配公司名称和行业
+                        for keyword in keywords:
+                            name_match = stocks['name'].str.contains(keyword, na=False)
+                            industry_match = stocks['industry'].str.contains(keyword, na=False)
+                            mask = mask | name_match | industry_match
+                        
+                        # 应用筛选
+                        stocks = stocks[mask]
+                    else:
+                        # 传统行业分类
+                        stocks = stocks[stocks['industry'] == industry]
+                
+                return stocks
+            except Exception as e:
+                logger.error(f"从Tushare获取股票列表失败: {str(e)}")
+                # 尝试使用备用数据
+                return self._get_local_stock_list(industry)
+        else:
+            return self._get_local_stock_list(industry)
+    def _get_local_stock_list(self, industry=None):
+        """从本地获取股票列表（备用方法）"""
+        # 热门板块和对应的关键词映射
+        hot_sectors_keywords = {
+            "人工智能": ["人工智能", "智能", "AI", "机器学习", "语音识别", "计算机", "软件", "科大讯飞"],
+            "半导体芯片": ["半导体", "芯片", "集成电路", "电子", "中芯国际"],
+            "新能源汽车": ["新能源", "汽车", "电动", "锂电池", "充电桩"],
+            "医疗器械": ["医疗", "器械", "医药", "设备"],
+            "云计算": ["云计算", "云服务", "互联网", "数据中心", "计算机"],
+            "5G通信": ["5G", "通信", "移动", "电信", "基站"],
+            "生物医药": ["生物", "医药", "制药", "基因", "疫苗"]
+        }
+        
+        try:
+            # 尝试从本地文件读取
+            stock_file = os.path.join(DATA_DIR, "stock_list.csv")
+            if os.path.exists(stock_file):
+                stocks = pd.read_csv(stock_file)
+                
+                # 行业筛选
+                if industry and industry != "全部":
+                    # 检查是否为自定义热门板块
+                    if industry in hot_sectors_keywords:
+                        # 对于热门板块，使用关键词匹配
+                        keywords = hot_sectors_keywords[industry]
+                        mask = pd.Series(False, index=stocks.index)
+                        
+                        # 匹配公司名称和行业
+                        for keyword in keywords:
+                            name_match = stocks['name'].str.contains(keyword, na=False)
+                            industry_match = stocks['industry'].str.contains(keyword, na=False)
+                            mask = mask | name_match | industry_match
+                        
+                        # 应用筛选
+                        stocks = stocks[mask]
+                    else:
+                        # 传统行业分类
+                        stocks = stocks[stocks['industry'] == industry]
+                
+                return stocks
+            else:
+                # 创建模拟数据
+                logger.warning("无法获取股票列表，创建模拟数据")
+                data = {
+                    'ts_code': ['000001.SZ', '000002.SZ', '000063.SZ', '000066.SZ', '000333.SZ', '399006.SZ', '600513.SH'],
+                    'symbol': ['000001', '000002', '000063', '000066', '000333', '399006', '600513'],
+                    'name': ['平安银行', '万科A', '中兴通讯', '中国长城', '美的集团', '创业板指', '联环药业'],
+                    'area': ['深圳', '深圳', '深圳', '深圳', '广东', '深圳', '上海'],
+                    'industry': ['银行', '房地产', '通信', '计算机', '家电', '指数', '医药'],
+                    'list_date': ['19910403', '19910129', '19971118', '19970620', '20130918', '20100601', '20020506']
+                }
+                stocks = pd.DataFrame(data)
+                
+                # 行业筛选
+                if industry and industry != "全部":
+                    # 检查是否为自定义热门板块
+                    if industry in hot_sectors_keywords:
+                        # 对于热门板块，使用关键词匹配
+                        keywords = hot_sectors_keywords[industry]
+                        mask = pd.Series(False, index=stocks.index)
+                        
+                        # 匹配公司名称和行业
+                        for keyword in keywords:
+                            name_match = stocks['name'].str.contains(keyword, na=False)
+                            industry_match = stocks['industry'].str.contains(keyword, na=False)
+                            mask = mask | name_match | industry_match
+                        
+                        # 应用筛选
+                        stocks = stocks[mask]
+                    else:
+                        # 传统行业分类
+                        stocks = stocks[stocks['industry'] == industry]
+                
+                return stocks
+        except Exception as e:
+            logger.error(f"从本地获取股票列表失败: {str(e)}")
+            return pd.DataFrame(columns=['ts_code', 'symbol', 'name', 'area', 'industry', 'list_date'])
+    def get_stock_daily_data(self, ts_code, start_date=None, end_date=None):
+        """
+        获取股票日线数据
+        
+        参数:
+            ts_code: 股票代码
+            start_date: 开始日期，格式：YYYYMMDD，默认为None，将使用实例化时的开始日期
+            end_date: 结束日期，格式：YYYYMMDD，默认为None，将使用实例化时的结束日期
+            
+        返回:
+            包含股票日线数据的DataFrame
+        """
+        # 设置默认日期
+        start_date = start_date if start_date is not None else self.start_date
+        end_date = end_date if end_date is not None else self.end_date
+        
+        # 从Tushare获取数据
+        try:
+            self.logger.info(f"从Tushare获取{ts_code}日线数据")
+            
+            # 直接初始化Tushare API (和__main__中保持一致的方式)
+            USER_TOKEN = '0e65a5c636112dc9d9af5ccc93ef06c55987805b9467db0866185a10'
+            ts.set_token(USER_TOKEN)
+            direct_pro_api = ts.pro_api()
+            
+            if direct_pro_api is None:
+                self.logger.error("无法直接初始化Tushare Pro API实例")
+                return self._get_local_stock_data(ts_code, start_date, end_date)
+            
+            # 尝试使用daily获取
+            df = direct_pro_api.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+            
+            # 如果daily没有数据，尝试创建模拟数据
+            if df is None or df.empty:
+                self.logger.warning(f"通过daily获取{ts_code}数据为空，使用备用方法")
+                return self._get_local_stock_data(ts_code, start_date, end_date)
+            
+            if df is not None and not df.empty:
+                # 预处理数据
+                if 'trade_date' in df.columns:
+                    df['trade_date'] = pd.to_datetime(df['trade_date'])
+                    df.sort_values('trade_date', inplace=True)
+                    df.set_index('trade_date', inplace=True)
+                
+                return df
+            else:
+                self.logger.warning(f"从Tushare获取{ts_code}数据失败，尝试使用备用方法")
+                return self._get_local_stock_data(ts_code, start_date, end_date)
+                
+        except Exception as e:
+            self.logger.error(f"从Tushare获取{ts_code}数据时出错: {str(e)}")
+            return self._get_local_stock_data(ts_code, start_date, end_date)
+    def _get_local_stock_data(self, ts_code, start_date=None, end_date=None):
+        """从本地获取股票日线数据（备用方法）"""
+        try:
+            # 尝试从本地文件读取
+            stock_file = os.path.join(DATA_DIR, f"{ts_code.replace('.', '_')}.csv")
+            if os.path.exists(stock_file):
+                df = pd.read_csv(stock_file)
+                # 处理日期
+                if 'trade_date' in df.columns:
+                    df['trade_date'] = pd.to_datetime(df['trade_date'])
+                    df.sort_values('trade_date', inplace=True)
+                    # 日期筛选
+                    if start_date:
+                        start_date = pd.to_datetime(start_date)
+                        df = df[df['trade_date'] >= start_date]
+                    if end_date:
+                        end_date = pd.to_datetime(end_date)
+                        df = df[df['trade_date'] <= end_date]
+                    df.set_index('trade_date', inplace=True)
+                return df
+            else:
+                # 创建模拟数据
+                logger.warning(f"无法获取{ts_code}的日线数据，创建模拟数据")
+                # 生成日期序列
+                if not end_date:
+                    end_date = datetime.now().strftime('%Y%m%d')
+                if not start_date:
+                    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
+                start_date = pd.to_datetime(start_date)
+                end_date = pd.to_datetime(end_date)
+                date_range = pd.date_range(start=start_date, end=end_date, freq='B')
+                # 生成模拟价格和交易量
+                n = len(date_range)
+                close = np.random.normal(100, 10, n).cumsum() + 3000
+                open_price = close * np.random.normal(1, 0.01, n)
+                high = np.maximum(close, open_price) * np.random.normal(1.02, 0.01, n)
+                low = np.minimum(close, open_price) * np.random.normal(0.98, 0.01, n)
+                vol = np.random.normal(100000, 20000, n) * (1 + 0.1 * np.sin(np.arange(n) / 10))
+                vol = np.abs(vol)
+                # 创建DataFrame
+                data = {
+                    'ts_code': [ts_code] * n,
+                    'open': open_price,
+                    'high': high,
+                    'low': low,
+                    'close': close,
+                    'vol': vol,
+                    'amount': vol * close
+                }
+                df = pd.DataFrame(data, index=date_range)
+                return df
+        except Exception as e:
+            logger.error(f"从本地获取{ts_code}的日线数据失败: {str(e)}")
+            return pd.DataFrame()
+    def calculate_momentum(self, data):
+        """计算动量指标"""
+        try:
+            if data is None or data.empty:
+                print("数据为空，无法计算技术指标")
+                return pd.DataFrame()
+                
+            df = data.copy()
+            
+            print(f"calculate_momentum: 输入数据大小 {df.shape}, 第一行:\n{df.iloc[0]}")
+            
+            # 确保数据有足够的行
+            if len(df) < 20:
+                print(f"数据行数不足，仅有 {len(df)} 行，无法计算技术指标(至少需要20行)")
+                return pd.DataFrame()
+            
+            # 基本指标 - 简化版
+            # 计算简单移动平均线
+            df['ma5'] = df['close'].rolling(window=5).mean()
+            df['ma10'] = df['close'].rolling(window=10).mean()
+            df['ma20'] = df['close'].rolling(window=20).mean()
+            df['ma60'] = df['close'].rolling(window=60).mean() if len(df) >= 60 else df['close']
+            
+            # 计算动量
+            df['momentum_5'] = df['close'] / df['close'].shift(5) - 1
+            df['momentum_10'] = df['close'] / df['close'].shift(10) - 1
+            df['momentum_20'] = df['close'] / df['close'].shift(20) - 1
+            
+            # 计算相对强弱指数 (RSI)
+            delta = df['close'].diff()
+            gain = delta.copy()
+            loss = delta.copy()
+            gain[gain < 0] = 0
+            loss[loss > 0] = 0
+            loss = abs(loss)
+            
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            
+            # 避免除以0
+            avg_loss = avg_loss.replace(0, 0.00001)
+            
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            
+            # 计算MACD
+            df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
+            df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
+            df['macd'] = df['ema12'] - df['ema26']
+            df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+            df['macd_hist'] = df['macd'] - df['signal']
+            
+            # 计算成交量变化
+            df['vol_ratio_5'] = df['vol'] / df['vol'].rolling(window=5).mean()
+            
+            # KDJ指标
+            low_min = df['low'].rolling(window=9).min()
+            high_max = df['high'].rolling(window=9).max()
+            
+            # 避免除以0
+            denom = high_max - low_min
+            denom = denom.replace(0, 0.00001)
+            
+            df['k'] = 100 * ((df['close'] - low_min) / denom)
+            df['d'] = df['k'].rolling(window=3).mean()
+            df['j'] = 3 * df['k'] - 2 * df['d']
+            
+            # 去除NaN值
+            df = df.fillna(method='bfill').fillna(method='ffill').fillna(0)
+            
+            print(f"指标计算完成，结果数据大小 {df.shape}")
+            
+            return df
+        except Exception as e:
+            print(f"计算技术指标时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
+    def calculate_momentum_score(self, data, custom_weights=None):
+        """计算动量综合评分
+        
+        Args:
+            data: 股票数据
+            custom_weights: 自定义指标权重
+            
+        Returns:
+            tuple: (总分, 得分详情字典)
+        """
+        try:
+            if data is None or data.empty:
+                print("数据为空，无法计算动量得分")
+                return 0, {}
+                
+            # 获取最新数据
+            latest = data.iloc[-1]
+            
+            # 初始化得分
+            scores = {}
+            
+            # 1. 价格动量得分 (0-40分)
+            momentum_score = 0
+            if 'momentum_5' in latest and not pd.isna(latest['momentum_5']):
+                momentum_5 = latest['momentum_5'] * 100  # 转为百分比
+                if momentum_5 > 2:  # 5日涨幅超过2%
+                    momentum_score += 10
+                elif momentum_5 > 0:  # 5日为正
+                    momentum_score += 5
+            
+            if 'momentum_20' in latest and not pd.isna(latest['momentum_20']):
+                momentum_20 = latest['momentum_20'] * 100  # 转为百分比
+                if momentum_20 > 10:  # 20日涨幅超过10%
+                    momentum_score += 30
+                elif momentum_20 > 5:  # 20日涨幅超过5%
+                    momentum_score += 20
+                elif momentum_20 > 0:  # 20日为正
+                    momentum_score += 10
+            
+            scores['momentum_score'] = momentum_score
+            scores['momentum_5'] = latest.get('momentum_5', 0) * 100
+            scores['momentum_20'] = latest.get('momentum_20', 0) * 100
+            
+            # 2. 均线得分 (0-20分)
+            ma_score = 0
+            close = latest['close']
+            
+            if 'ma5' in latest and not pd.isna(latest['ma5']) and close > latest['ma5']:
+                ma_score += 5
+            if 'ma10' in latest and not pd.isna(latest['ma10']) and close > latest['ma10']:
+                ma_score += 5
+            if 'ma20' in latest and not pd.isna(latest['ma20']) and close > latest['ma20']:
+                ma_score += 5
+            if 'ma60' in latest and not pd.isna(latest['ma60']) and close > latest['ma60']:
+                ma_score += 5
+            
+            scores['ma_score'] = ma_score
+            
+            # 3. RSI得分 (0-20分)
+            rsi_score = 0
+            if 'rsi' in latest and not pd.isna(latest['rsi']):
+                rsi = latest['rsi']
+                if 40 <= rsi <= 80:  # 适中且偏强的RSI
+                    rsi_score += 10
+                    if 50 <= rsi <= 70:  # 理想区间
+                        rsi_score += 10
+            
+            scores['rsi_score'] = rsi_score
+            scores['rsi'] = latest.get('rsi', 0)
+            
+            # 4. MACD得分 (0-20分)
+            macd_score = 0
+            if all(x in latest and not pd.isna(latest[x]) for x in ['macd', 'signal', 'macd_hist']):
+                macd = latest['macd']
+                signal = latest['signal']
+                hist = latest['macd_hist']
+                
+                if macd > 0 and signal > 0:  # MACD和信号线都为正
+                    macd_score += 10
+                if macd > signal:  # MACD在信号线之上
+                    macd_score += 5
+                if hist > 0:  # 柱状图为正
+                    macd_score += 5
+            
+            scores['macd_score'] = macd_score
+            scores['macd'] = latest.get('macd', 0)
+            
+            # 计算总分
+            total_score = momentum_score + ma_score + rsi_score + macd_score
+            
+            # 总分控制在100以内
+            total_score = min(100, total_score)
+            
+            print(f"动量得分: {total_score} (动量: {momentum_score}, 均线: {ma_score}, RSI: {rsi_score}, MACD: {macd_score})")
+            
+            return total_score, scores
+        except Exception as e:
+            print(f"计算动量得分时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return 0, {}
+    def plot_stock_chart(self, data, stock_code, stock_name, score_details, save_path=None, show_additional_indicators=True):
+        """绘制股票K线和技术指标图
+        
+        Args:
+            data: 股票数据
+            stock_code: 股票代码
+            stock_name: 股票名称
+            score_details: 得分详情
+            save_path: 保存路径
+            show_additional_indicators: 是否显示额外指标
+            
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            if data is None or data.empty:
+                print(f"无法绘制{stock_code}的图表，数据为空")
+                return False
+                
+            # 创建图表
+            fig = plt.figure(figsize=(14, 14))
+            
+            # 设置网格
+            gs = fig.add_gridspec(5, 1, height_ratios=[3, 1, 1, 1, 1])
+            
+            # 第一个子图：K线和均线
+            ax1 = fig.add_subplot(gs[0, 0])
+            total_score = sum(v for k, v in score_details.items() if isinstance(v, (int, float)))
+            ax1.set_title(f"{stock_name}({stock_code}) 动量分析 - 总分: {total_score}", fontsize=15)
+            
+            # 绘制K线
+            for i in range(len(data)):
+                date = data.index[i]
+                open_price, close, high, low = data.iloc[i][['open', 'close', 'high', 'low']]
+                # 确定颜色（红涨绿跌）
+                color = 'red' if close >= open_price else 'green'
+                # 绘制影线
+                ax1.plot([date, date], [low, high], color=color, linewidth=1)
+                # 绘制实体
+                rect_height = abs(open_price - close)
+                rect_bottom = min(open_price, close)
+                ax1.add_patch(plt.Rectangle((date - pd.Timedelta(days=0.4), rect_bottom),
+                                        pd.Timedelta(days=0.8), rect_height,
+                                        edgecolor=color, facecolor=color))
+                                        
+            # 绘制均线
+            for ma, color in [('ma5', 'blue'), ('ma10', 'orange'), ('ma20', 'purple'), ('ma60', 'brown')]:
+                if ma in data.columns:
+                    ax1.plot(data.index, data[ma], label=ma.upper(), color=color, linewidth=1)
+            
+            ax1.legend(loc='best')
+            ax1.grid(True)
+            
+            # 第二个子图：成交量
+            ax2 = fig.add_subplot(gs[1, 0], sharex=ax1)
+            for i in range(len(data)):
+                date = data.index[i]
+                open_price, close = data.iloc[i][['open', 'close']]
+                color = 'red' if close >= open_price else 'green'
+                ax2.bar(date, data.iloc[i]['vol'], color=color, width=pd.Timedelta(days=0.8))
+            ax2.set_ylabel('Volume')
+            ax2.grid(True)
+            
+            # 第三个子图：MACD
+            if all(col in data.columns for col in ['macd', 'signal', 'macd_hist']):
+                ax3 = fig.add_subplot(gs[2, 0], sharex=ax1)
+                ax3.plot(data.index, data['macd'], label='MACD', color='blue', linewidth=1)
+                ax3.plot(data.index, data['signal'], label='Signal', color='red', linewidth=1)
+                # 绘制MACD柱状图
+                for i in range(len(data)):
+                    date = data.index[i]
+                    hist = data.iloc[i]['macd_hist']
+                    color = 'red' if hist >= 0 else 'green'
+                    ax3.bar(date, hist, color=color, width=pd.Timedelta(days=0.8))
+                ax3.legend(loc='best')
+                ax3.set_ylabel('MACD')
+                ax3.grid(True)
+            
+            # 第四个子图：RSI
+            if 'rsi' in data.columns:
+                ax4 = fig.add_subplot(gs[3, 0], sharex=ax1)
+                ax4.plot(data.index, data['rsi'], label='RSI', color='purple', linewidth=1)
+                ax4.axhline(y=30, color='green', linestyle='--')
+                ax4.axhline(y=70, color='red', linestyle='--')
+                ax4.legend(loc='best')
+                ax4.set_ylabel('RSI')
+                ax4.set_ylim(0, 100)
+                ax4.grid(True)
+            
+            # 第五个子图：KDJ
+            if all(col in data.columns for col in ['k', 'd', 'j']):
+                ax5 = fig.add_subplot(gs[4, 0], sharex=ax1)
+                ax5.plot(data.index, data['k'], label='K', color='blue', linewidth=1)
+                ax5.plot(data.index, data['d'], label='D', color='yellow', linewidth=1)
+                ax5.plot(data.index, data['j'], label='J', color='magenta', linewidth=1)
+                ax5.axhline(y=20, color='green', linestyle='--')
+                ax5.axhline(y=80, color='red', linestyle='--')
+                ax5.legend(loc='best')
+                ax5.set_ylabel('KDJ')
+                ax5.grid(True)
+            
+            # 添加得分信息
+            score_text = "\n".join([f"{k}: {v}" for k, v in score_details.items()])
+            props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+            ax1.text(0.02, 0.05, score_text, transform=ax1.transAxes, fontsize=9,
+                    verticalalignment='bottom', bbox=props)
+                    
+            # 调整布局
+            plt.tight_layout()
+            
+            # 保存图表
+            if save_path:
+                plt.savefig(save_path)
+                print(f"已保存{stock_code}的图表到{save_path}")
+                plt.close(fig)
+                return True
+            else:
+                plt.show()
+                return True
+        except Exception as e:
+            print(f"绘制图表时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+    def _analyze_single_stock(self, stock_tuple):
+        """分析单个股票的动量表现
+        
+        Args:
+            stock_tuple: 包含股票索引和数据的元组 (idx, stock)
+            
+        Returns:
+            dict: 分析结果，如果分析失败则返回None
+        """
+        try:
+            idx, stock = stock_tuple
+            ts_code = stock['ts_code']
+            name = stock['name']
+            industry = stock.get('industry', '')
+            
+            # 计算日期范围
+            end_date = datetime.now().strftime('%Y%m%d')
+            days_ago = self.lookback_period + 100  # 额外的数据用于计算技术指标
+            start_date = (datetime.now() - timedelta(days=days_ago)).strftime('%Y%m%d')
+            
+            print(f"开始分析 {name}({ts_code}) - 日期范围: {start_date} 到 {end_date}")
+            
+            # 获取日线数据
+            data = self.get_stock_daily_data(ts_code, start_date=start_date, end_date=end_date)
+            if data is None or data.empty:
+                print(f"无法获取{ts_code}的数据，跳过分析")
+                return None
+            
+            print(f"获取到{len(data)}条数据，数据头部:\n{data.head()}")
+            print(f"数据列名: {data.columns.tolist()}")
+            
+            # 计算技术指标
+            try:
+                # 确保基本价格数据存在
+                required_cols = ['open', 'high', 'low', 'close', 'vol']
+                for col in required_cols:
+                    if col not in data.columns:
+                        print(f"缺少必要列: {col}")
+                        return None
+                
+                # 转换数据类型
+                for col in required_cols:
+                    data[col] = pd.to_numeric(data[col], errors='coerce')
+                
+                data = self.calculate_momentum(data)
+                if data.empty:
+                    print(f"计算{ts_code}的技术指标后数据为空，跳过分析")
+                    return None
+                
+                print(f"技术指标计算完成，新增列: {[col for col in data.columns if col not in required_cols][:5]}...")
+            except Exception as e:
+                print(f"计算{ts_code}的技术指标时出错: {str(e)}")
+                return None
+            
+            # 计算动量得分
+            score, score_details = self.calculate_momentum_score(data)
+            print(f"计算得分: {score:.1f}")
+            
+            # 如果得分低于阈值，跳过
+            if score < 50:  # 使用默认阈值
+                print(f"{name}({ts_code}) 得分 {score:.1f} 低于阈值 50，跳过")
+                return None
+            
+            # 构建结果对象
+            result = {
+                'code': ts_code,
+                'name': name,
+                'industry': industry,
+                'close': float(data.iloc[-1]['close']),
+                'total_score': score,
+                'price_momentum': float(data.iloc[-1].get('momentum_20', 0) * 100),  # 转为百分比
+                'volume_momentum': float(data.iloc[-1].get('vol_ratio_20', 0)) if 'vol_ratio_20' in data.iloc[-1] else 0,
+                'rsi': float(data.iloc[-1]['rsi']) if 'rsi' in data.iloc[-1] else 0,
+                'macd': float(data.iloc[-1]['macd']) if 'macd' in data.iloc[-1] else 0,
+                'kdj': float(data.iloc[-1]['k']) if 'k' in data.iloc[-1] else 0,
+                'score_details': score_details,
+                'analysis_date': pd.Timestamp.now().strftime('%Y-%m-%d'),
+            }
+            
+            print(f"分析完成: {name}({ts_code}) - 得分: {score:.1f}")
+            return result
+        
+        except Exception as e:
+            print(f"分析{stock.get('name', 'unknown')}({stock.get('ts_code', 'unknown')})时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def analyze_stocks(self, stock_list, sample_size=100, min_score=60, lookback_days=None, custom_weights=None):
+        """分析股票列表，找出具有强劲动量的股票
+        
+        Args:
+            stock_list: 股票列表DataFrame
+            sample_size: 分析样本大小
+            min_score: 最低分数阈值
+            lookback_days: 自定义回溯天数，覆盖默认设置
+            custom_weights: 自定义指标权重
+            
+        Returns:
+            list: 分析结果列表
+        """
+        results = []
+        
+        # 确保股票列表不为空
+        if stock_list.empty:
+            logger.error("股票列表为空，无法进行分析")
+            return results
+            
+        # 记录原始股票数量
+        original_count = len(stock_list)
+        logger.info(f"准备分析 {original_count} 支股票")
+        
+        # 限制样本大小
+        if sample_size < len(stock_list):
+            stock_list = stock_list.sample(sample_size)
+            logger.info(f"从 {original_count} 支股票中随机选择 {sample_size} 支进行分析")
+        else:
+            logger.info(f"分析全部 {original_count} 支股票")
+            
+        total = len(stock_list)
+        logger.info(f"开始分析 {total} 支股票")
+        
+        # 使用自定义回溯天数或默认设置
+        if lookback_days:
+            self.lookback_period = lookback_days
+        
+        # 禁用并行处理，使用串行处理
+        # 临时修复，避免多进程序列化问题
+        self.use_parallel = False
+        
+        # 使用串行处理
+        for idx, stock in stock_list.iterrows():
+            result = self._analyze_single_stock((idx, stock))
+            if result:
+                results.append(result)
+        
+        # 按得分排序
+        results = sorted(results, key=lambda x: x['total_score'], reverse=True)
+        
+        logger.info(f"动量分析完成，共找到 {len(results)} 支符合条件的股票")
+        
+        return results
+    def __del__(self):
+        """清理资源"""
+        if hasattr(self, 'pool') and self.pool:
+            self.pool.close()
+            self.pool.join()
+# 运行测试
+if __name__ == "__main__":
+    print("开始测试Tushare API获取股票数据")
+    # 测试
+    analyzer = MomentumAnalyzer(use_tushare=True)
+    analyzer.use_parallel = False  # 禁用并行处理
+    
+    # 设置日期范围
+    analyzer.start_date = (datetime.now() - timedelta(days=60)).strftime('%Y%m%d')
+    analyzer.end_date = datetime.now().strftime('%Y%m%d')
+    
+    # 直接测试获取单个股票数据
+    print("\n直接测试获取平安银行(000001.SZ)数据:")
+    try:
+        df_test = analyzer.get_stock_daily_data('000001.SZ')
+        if df_test is not None and not df_test.empty:
+            print(f"成功获取到股票数据，共{len(df_test)}条记录")
+            print(df_test.head())
+        else:
+            print("获取数据失败，返回为空")
+    except Exception as e:
+        print(f"测试获取股票数据时出错: {e}")
+    
+    # 获取股票列表
+    print("\n获取股票列表...")
+    stocks = analyzer.get_stock_list()
+    print(f"获取到 {len(stocks)} 支股票")
+    
+    # 分析前5支股票（小样本测试）
+    sample_size = 5
+    print(f"\n分析前{sample_size}支股票...")
+    
+    # 手动遍历股票列表进行分析，显示进度
+    results = []
+    for i, (idx, stock) in enumerate(stocks.head(sample_size).iterrows()):
+        print(f"[{i+1}/{sample_size}] 正在分析: {stock['name']}({stock['ts_code']})")
+        result = analyzer._analyze_single_stock((idx, stock))
+        if result:
+            results.append(result)
+            print(f"✓ 分析完成: {stock['name']}({stock['ts_code']}) - 得分: {result['total_score']:.1f}")
+        else:
+            print(f"✗ {stock['name']}({stock['ts_code']}) 分析未通过筛选条件")
+        print("-" * 50)  # 分隔线
+    
+    # 按得分排序
+    results = sorted(results, key=lambda x: x['total_score'], reverse=True)
+    
+    # 输出结果
+    print("\n分析结果:")
+    if results:
+        for r in results:
+            print(f"{r['name']}({r['code']}): 得分={r['total_score']:.1f}, 动量20={r['price_momentum']:.2f}%")
+    else:
+        print("未找到符合条件的股票")

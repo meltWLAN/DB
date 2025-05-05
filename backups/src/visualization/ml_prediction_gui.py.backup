@@ -1,0 +1,718 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+机器学习预测模型GUI界面
+用于选择股票、设置参数并可视化预测结果
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from tkinter.scrolledtext import ScrolledText
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import os
+import sys
+import logging
+from pathlib import Path
+from threading import Thread
+from datetime import datetime, timedelta
+import time
+from src.utils.logger import get_logger
+
+# Set logger for this module explicitly
+logger = get_logger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# 确保模块路径正确
+current_dir = Path(__file__).parent
+src_dir = current_dir.parent
+sys.path.insert(0, str(src_dir))
+
+# 导入系统模块
+try:
+    from src.strategies.ml_prediction_model import MLPredictionModel
+    from src.indicators.advanced_indicators import AdvancedIndicators
+    from src.data.data_fetcher import DataFetcher
+except ImportError as e:
+    print(f"导入模块时出错: {e}")
+    logger = logging.getLogger("ml_prediction_gui")
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+class MLPredictionGUI:
+    """机器学习预测模型图形界面"""
+    
+    def __init__(self, root, model_directory="src/models"):
+        """
+        初始化GUI界面
+        
+        Args:
+            root: Tkinter根窗口
+            model_directory: 模型目录
+        """
+        self.root = root
+        self.root.title("机器学习股票预测系统")
+        self.root.geometry("1200x800")
+        
+        # 设置字体和样式
+        self.root.option_add("*Font", "Arial 10")
+        
+        # 创建主框架
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 设置界面样式
+        self.setup_styles()
+        
+        # 创建GUI组件
+        self.create_widgets()
+        
+        # 初始化数据和模型
+        try:
+            self.data_fetcher = DataFetcher()
+            self.ml_model = MLPredictionModel()
+        except Exception as e:
+            logger.error(f"初始化数据获取器或模型时出错: {e}")
+            messagebox.showerror("初始化错误", f"无法初始化数据模块或预测模型: {e}")
+        
+        # 默认股票代码
+        self.default_stocks = [
+            "600000", "600036", "601398", "601939", # 银行
+            "600519", "000858", "600887", # 消费
+            "000333", "002415", "600276", # 家电医药
+            "601318", "600030", "600050"  # 保险证券指数
+        ]
+        
+        # 加载默认股票列表
+        self.load_stock_list()
+        
+        # Industry selection frame - NEW
+        self.industry_frame = ttk.LabelFrame(self.main_frame, text="行业选择", padding=(10, 10))
+        self.industry_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nw")
+        
+        # Industry selection UI elements - NEW
+        ttk.Label(self.industry_frame, text="选择行业:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.industry_var = tk.StringVar(value="加载中...")
+        self.industry_combo = ttk.Combobox(self.industry_frame, textvariable=self.industry_var, state="readonly", width=15)
+        self.industry_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        self.load_stocks_btn = ttk.Button(self.industry_frame, text="加载成分股", command=self._load_industry_stocks)
+        self.load_stocks_btn.grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
+        
+        # Stock selection frame
+        self.stock_frame = tk.LabelFrame(self.main_frame, text="股票选择", padx=10, pady=10)
+        self.stock_frame.grid(row=2, column=0, padx=10, pady=10, sticky="nw")
+        
+        # 股票代码输入
+        ttk.Label(self.stock_frame, text="股票代码:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.stock_combo = ttk.Combobox(self.stock_frame, width=15)
+        self.stock_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        
+        # 添加股票按钮
+        ttk.Button(self.stock_frame, text="添加股票", command=self.add_stock).grid(
+            row=0, column=2, padx=5, pady=5)
+        
+        # 预测天数
+        ttk.Label(self.stock_frame, text="预测天数:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.horizon_var = tk.StringVar(value="5")
+        horizon_combo = ttk.Combobox(self.stock_frame, textvariable=self.horizon_var, width=5,
+                                    values=["1", "3", "5", "10", "20"])
+        horizon_combo.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        
+        # 信心阈值
+        ttk.Label(self.stock_frame, text="信心阈值:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.threshold_var = tk.StringVar(value="0.6")
+        threshold_combo = ttk.Combobox(self.stock_frame, textvariable=self.threshold_var, width=5,
+                                      values=["0.5", "0.6", "0.7", "0.8", "0.9"])
+        threshold_combo.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+        
+        # 数据区间
+        ttk.Label(self.stock_frame, text="数据区间(天):").grid(row=3, column=0, padx=5, pady=5, sticky="w")
+        self.lookback_var = tk.StringVar(value="365")
+        lookback_combo = ttk.Combobox(self.stock_frame, textvariable=self.lookback_var, width=5,
+                                     values=["60", "120", "250", "365", "500"])
+        lookback_combo.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+        
+        # 预测按钮
+        predict_button = ttk.Button(self.stock_frame, text="开始预测", style="Predict.TButton",
+                                   command=self.run_prediction)
+        predict_button.grid(row=4, column=0, columnspan=3, padx=5, pady=10)
+        
+        # 股票列表
+        ttk.Label(self.stock_frame, text="已添加股票:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        self.stock_listbox = tk.Listbox(self.stock_frame, width=20, height=10)
+        self.stock_listbox.grid(row=6, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
+        
+        # 删除股票按钮
+        ttk.Button(self.stock_frame, text="删除所选股票", command=self.remove_stock).grid(
+            row=7, column=0, columnspan=3, padx=5, pady=5)
+        
+        # 创建中间面板（结果区域）
+        result_frame = ttk.LabelFrame(self.main_frame, text="预测结果", padding="10")
+        result_frame.grid(row=1, column=1, padx=10, pady=10, sticky="nsew")
+        
+        # 结果表格
+        self.result_tree = ttk.Treeview(result_frame, columns=("stock", "prediction", "confidence", 
+                                                             "target_date"), show="headings")
+        self.result_tree.heading("stock", text="股票代码")
+        self.result_tree.heading("prediction", text="预测")
+        self.result_tree.heading("confidence", text="信心")
+        self.result_tree.heading("target_date", text="目标日期")
+        
+        self.result_tree.column("stock", width=80)
+        self.result_tree.column("prediction", width=80)
+        self.result_tree.column("confidence", width=80)
+        self.result_tree.column("target_date", width=100)
+        
+        self.result_tree.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        
+        # 滚动条
+        scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.result_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # 特征重要性区域
+        ttk.Label(result_frame, text="特征重要性:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.feature_text = ScrolledText(result_frame, width=40, height=10)
+        self.feature_text.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        
+        # 创建右侧面板（图表区域）
+        chart_frame = ttk.LabelFrame(self.main_frame, text="可视化图表", padding="10")
+        chart_frame.grid(row=1, column=2, padx=10, pady=10, sticky="nsew")
+        
+        # 创建图表框架
+        self.fig = plt.Figure(figsize=(6, 8), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # 子图
+        self.ax1 = self.fig.add_subplot(311)  # 价格图
+        self.ax2 = self.fig.add_subplot(312)  # 技术指标
+        self.ax3 = self.fig.add_subplot(313)  # 预测概率
+        
+        # 状态栏
+        self.status_var = tk.StringVar(value="就绪")
+        status_bar = ttk.Label(self.main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
+        status_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=5)
+        
+        # 设置网格权重，使面板可以随窗口调整大小
+        for i in range(3):
+            self.main_frame.columnconfigure(i, weight=1)
+        self.main_frame.rowconfigure(1, weight=1)
+        
+        # 使结果区域可随窗口调整大小
+        result_frame.columnconfigure(0, weight=1)
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.rowconfigure(2, weight=1)
+        
+        # Load industry list - NEW
+        self._load_industry_list()
+        
+    def setup_styles(self):
+        """设置GUI样式"""
+        style = ttk.Style()
+        
+        # 设置全局样式
+        style.configure("TFrame", background="#f5f5f5")
+        style.configure("TButton", foreground="#0066cc", padding=5)
+        style.configure("TLabel", background="#f5f5f5", foreground="#333333")
+        style.configure("TEntry", padding=5)
+        
+        # 自定义按钮样式
+        style.configure("Predict.TButton", foreground="white", background="#4CAF50", 
+                        font=("Arial", 12, "bold"), padding=8)
+        
+        # 标签样式
+        style.configure("Header.TLabel", font=("Arial", 14, "bold"), padding=5)
+        style.configure("Subheader.TLabel", font=("Arial", 12, "bold"), padding=3)
+        style.configure("Result.TLabel", foreground="#0066cc", font=("Arial", 12, "bold"))
+        
+    def create_widgets(self):
+        """创建GUI控件"""
+        # 标题
+        title_label = ttk.Label(self.main_frame, text="机器学习股票预测系统", 
+                               style="Header.TLabel")
+        title_label.grid(row=0, column=0, columnspan=3, pady=10, sticky="w")
+        
+    def load_stock_list(self):
+        """加载默认股票列表"""
+        for stock in self.default_stocks:
+            self.stock_listbox.insert(tk.END, stock)
+        
+        # 更新下拉框
+        self.stock_combo['values'] = self.default_stocks
+        
+    def add_stock(self):
+        """添加股票到列表"""
+        stock_code = self.stock_combo.get().strip()
+        if not stock_code:
+            messagebox.showwarning("警告", "请输入股票代码")
+            return
+            
+        # 检查是否已经在列表中
+        existing_stocks = self.stock_listbox.get(0, tk.END)
+        if stock_code in existing_stocks:
+            messagebox.showinfo("提示", f"股票 {stock_code} 已在列表中")
+            return
+            
+        # 添加到列表
+        self.stock_listbox.insert(tk.END, stock_code)
+        
+        # 清空输入框
+        self.stock_combo.set("")
+        
+    def remove_stock(self):
+        """从列表中删除所选股票"""
+        selected = self.stock_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("警告", "请先选择要删除的股票")
+            return
+            
+        # 从后往前删除，避免索引变化问题
+        for i in sorted(selected, reverse=True):
+            self.stock_listbox.delete(i)
+            
+    def run_prediction(self):
+        """运行预测任务"""
+        # 获取所有股票代码
+        stocks = list(self.stock_listbox.get(0, tk.END))
+        if not stocks:
+            messagebox.showwarning("警告", "请先添加股票")
+            return
+            
+        # 获取参数
+        try:
+            prediction_horizon = int(self.horizon_var.get())
+            confidence_threshold = float(self.threshold_var.get())
+            lookback_days = int(self.lookback_var.get())
+        except ValueError:
+            messagebox.showerror("错误", "请输入有效的参数")
+            return
+            
+        # 清空以前的结果
+        for i in self.result_tree.get_children():
+            self.result_tree.delete(i)
+        self.feature_text.delete("1.0", tk.END)
+        
+        # 更新状态
+        self.status_var.set("正在预测...")
+        
+        # 使用线程避免UI冻结
+        thread = Thread(target=self._prediction_thread, 
+                       args=(stocks, prediction_horizon, confidence_threshold, lookback_days))
+        thread.daemon = True
+        thread.start()
+        
+    def _prediction_thread(self, stocks, prediction_horizon, confidence_threshold, lookback_days):
+        """
+        预测线程
+        
+        Args:
+            stocks: 股票列表
+            prediction_horizon: 预测天数
+            confidence_threshold: 信心阈值
+            lookback_days: 回溯天数
+        """
+        results = []
+        
+        # 为预测创建新的模型实例
+        try:
+            ml_model = MLPredictionModel(prediction_horizon=prediction_horizon)
+        except Exception as e:
+            logger.error(f"创建模型实例时出错: {e}")
+            self.root.after(0, lambda err=str(e): messagebox.showerror(
+                "错误", f"创建预测模型时出错: {err}"))
+            self.root.after(0, lambda: self.status_var.set("预测失败"))
+            return
+        
+        for stock in stocks:
+            try:
+                # 更新状态
+                self.root.after(0, lambda s=stock: self.status_var.set(f"正在加载和预测 {s} 的数据..."))
+                
+                # 获取历史数据
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=lookback_days)
+                
+                try:
+                    data = self.data_fetcher.get_stock_data(
+                        stock, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                    
+                    if data is None or len(data) < 60:
+                        self.root.after(0, lambda s=stock: messagebox.showwarning(
+                            "警告", f"股票 {s} 的数据不足，跳过预测"))
+                        continue
+                except Exception as e:
+                    self.root.after(0, lambda s=stock, err=str(e): messagebox.showerror(
+                        "错误", f"获取股票 {s} 数据失败: {err}"))
+                    continue
+                    
+                # 添加高级指标
+                try:
+                    data = AdvancedIndicators.add_advanced_indicators(data)
+                except Exception as e:
+                    logger.error(f"重新获取数据并添加指标时出错: {e}")
+                    # 继续执行，不显示错误对话框
+                    pass
+                
+                # 预测
+                try:
+                    prediction = ml_model.predict(data)
+                    # --- DEBUG LOGGING START ---
+                    logger.debug(f"模型预测原始返回 (Stock: {stock}):\n{prediction}")
+                    if prediction is not None and 'confidence' in prediction.columns:
+                        conf_series = prediction['confidence']
+                        logger.debug(f"置信度列类型: {conf_series.dtype}")
+                        logger.debug(f"置信度列尾部值:\n{conf_series.tail()}")
+                    # --- DEBUG LOGGING END ---
+                except Exception as e:
+                    logger.error(f"运行预测时出错: {e}")
+                    # Optional: Display error in GUI status or a message box
+                    self.root.after(0, lambda s=stock, err=str(e): self._update_status(f"错误：预测 {s} 失败: {err}"))
+                    continue # Skip to next stock if prediction fails
+
+                # Check if prediction DataFrame is None or empty after predict call
+                if prediction is None or prediction.empty:
+                    logger.warning(f"模型预测返回空结果 for stock {stock}. 跳过。")
+                    self.root.after(0, lambda s=stock: self._update_status(f"警告：{s} 预测结果为空."))
+                    continue
+
+                # 获取预测结果DataFrame的最后一个索引（代表最新日期）
+                last_date = prediction.index[-1]
+                # 计算目标日期 - 直接使用传入的 prediction_horizon
+                try:
+                     target_date = last_date + pd.Timedelta(days=prediction_horizon)
+                     target_date_str = target_date.strftime('%Y-%m-%d')
+                except Exception as date_err:
+                     logger.error(f"计算目标日期时出错: {date_err}")
+                     target_date_str = "Error"
+
+                # 将结果添加到列表
+                prediction_value = "上涨" if prediction['prediction'].iloc[-1] == 1 else "下跌"
+                # Add error handling for confidence score extraction
+                try:
+                    raw_confidence = prediction['confidence'].iloc[-1]
+                    if pd.isna(raw_confidence):
+                        confidence_score = "N/A"
+                    else:
+                        confidence_score = f"{float(raw_confidence):.2f}"
+                except (KeyError, IndexError, ValueError, TypeError) as e:
+                    logger.warning(f"无法提取或格式化置信度分数 for {stock}: {e}")
+                    confidence_score = "N/A"
+                
+                # Append with calculated target_date_str and confidence_score
+                results.append((stock, prediction_value, confidence_score, target_date_str, data, ml_model))
+                
+                # 更新结果表格 (use target_date_str and confidence_score)
+                self.root.after(0, lambda s=stock, p=prediction_value, conf=confidence_score, 
+                               d=target_date_str: self._update_result_table(s, p, conf, d))
+                
+                # 如果是第一个结果，则显示图表和特征重要性
+                if len(results) == 1:
+                    self.root.after(0, lambda r=results[0]: self._display_first_result(r))
+                
+            except Exception as e:
+                logger.error(f"预测股票 {stock} 时出错: {e}")
+                self.root.after(0, lambda s=stock, err=str(e): messagebox.showerror(
+                    "错误", f"预测股票 {s} 时出错: {err}"))
+        
+        self.root.after(0, lambda: self.status_var.set(f"预测完成，共 {len(results)} 个结果"))
+        
+        # 如果没有结果，显示相应的消息
+        if not results:
+            self.root.after(0, lambda: messagebox.showinfo("结果", "没有成功的预测结果"))
+        
+    def _update_result_table(self, stock, prediction, confidence, target_date):
+        """更新结果表格"""
+        # 为预测结果设置适当的颜色
+        if prediction == "上涨":
+            prediction_text = "↑ 上涨"
+            tag = "bullish"
+        else:
+            prediction_text = "↓ 下跌"
+            tag = "bearish"
+            
+        # 为概率设置颜色, handle non-numeric confidence
+        prob_tag = "default_prob" # Default tag
+        if confidence != "N/A":
+            try:
+                prob_value = float(confidence)
+                if prob_value > 0.7:
+                    prob_tag = "high_prob"
+                elif prob_value > 0.6:
+                    prob_tag = "medium_prob"
+                else:
+                    prob_tag = "low_prob"
+            except ValueError:
+                logger.warning(f"无法将置信度 '{confidence}' 转换为浮点数进行颜色标记。")
+                # Keep default tag
+
+        # 添加到表格
+        item_id = self.result_tree.insert("", tk.END, values=(stock, prediction_text, confidence, target_date))
+        
+        # 配置标签颜色
+        self.result_tree.tag_configure("bullish", foreground="green")
+        self.result_tree.tag_configure("bearish", foreground="red")
+        self.result_tree.tag_configure("high_prob", foreground="blue")
+        self.result_tree.tag_configure("medium_prob", foreground="purple")
+        self.result_tree.tag_configure("low_prob", foreground="orange")
+        self.result_tree.tag_configure("default_prob", foreground="black") # Add default tag color
+        
+        # 应用标签
+        self.result_tree.item(item_id, tags=(tag, prob_tag))
+        
+        # 为结果项添加点击事件
+        self.result_tree.bind('<ButtonRelease-1>', self._on_result_select)
+        
+    def _on_result_select(self, event):
+        """当用户选择结果项时的回调"""
+        # 获取选中的项
+        selection = self.result_tree.selection()
+        if not selection:
+            return
+            
+        # 获取选中项的值
+        item_id = selection[0]
+        item_values = self.result_tree.item(item_id, 'values')
+        
+        if not item_values:
+            return
+            
+        # 查找对应的结果
+        stock = item_values[0]
+        
+        # 显示对应的结果
+        for result in self._get_results():
+            if result[0] == stock:
+                self._display_result(result)
+                break
+                
+    def _get_results(self):
+        """获取所有结果项"""
+        results = []
+        for item_id in self.result_tree.get_children():
+            item_values = self.result_tree.item(item_id, 'values')
+            if item_values:
+                stock = item_values[0]
+                prediction = "上涨" if "上涨" in item_values[1] else "下跌"
+                confidence = item_values[2]
+                target_date = item_values[3]
+                results.append((stock, prediction, confidence, target_date, None, None))
+        return results
+                
+    def _display_first_result(self, result):
+        """显示第一个结果的图表和特征重要性"""
+        if not result:
+            return
+            
+        self._display_result(result)
+        
+    def _display_result(self, result):
+        """显示选中结果的图表和特征重要性"""
+        if not result:
+            return
+            
+        stock, prediction, confidence, target_date, data, model = result
+        
+        # 如果数据不完整，尝试重新获取
+        if data is None or model is None:
+            try:
+                # 获取数据
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=int(self.lookback_var.get()))
+                
+                data = self.data_fetcher.get_stock_data(
+                    stock, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                
+                if data is None or len(data) < 60:
+                    messagebox.showwarning("警告", f"无法获取股票 {stock} 的完整数据")
+                    return
+                    
+                # 添加高级指标
+                data = AdvancedIndicators.add_advanced_indicators(data)
+                
+                # 创建模型实例
+                model = MLPredictionModel()
+            except Exception as e:
+                logger.error(f"重新获取数据时出错: {e}")
+                messagebox.showerror("错误", f"无法显示股票 {stock} 的详细信息: {e}")
+                return
+        
+        # 绘制图表
+        self._plot_charts(stock, data, prediction, confidence)
+        
+        # 显示特征重要性
+        if model:
+            self._show_feature_importance(model)
+        
+    def _plot_charts(self, stock, data, prediction, confidence):
+        """绘制图表"""
+        # 清除之前的图形
+        self.ax1.clear()
+        self.ax2.clear()
+        self.ax3.clear()
+        
+        # 获取最近的数据点
+        recent_data = data.tail(60).copy()
+        
+        # 价格图
+        recent_data['close'].plot(ax=self.ax1, label='价格', color='blue')
+        if 'ma20' in recent_data.columns:
+            recent_data['ma20'].plot(ax=self.ax1, label='MA20', color='orange')
+        if 'ma60' in recent_data.columns:
+            recent_data['ma60'].plot(ax=self.ax1, label='MA60', color='green')
+            
+        # 添加预测箭头
+        last_date = recent_data.index[-1]
+        last_price = recent_data['close'].iloc[-1]
+        
+        if prediction == "上涨":
+            self.ax1.annotate('↑', xy=(last_date, last_price), xytext=(0, 15), 
+                            textcoords='offset points', ha='center', va='bottom',
+                            color='green', fontsize=15, arrowprops=dict(
+                                arrowstyle='->', color='green'))
+        else:
+            self.ax1.annotate('↓', xy=(last_date, last_price), xytext=(0, -15), 
+                            textcoords='offset points', ha='center', va='top',
+                            color='red', fontsize=15, arrowprops=dict(
+                                arrowstyle='->', color='red'))
+                                
+        self.ax1.set_title(f'{stock} 价格走势')
+        self.ax1.legend()
+        self.ax1.grid(True, linestyle='--', alpha=0.5)
+        
+        # 技术指标图
+        if 'rsi14' in recent_data.columns:
+            recent_data['rsi14'].plot(ax=self.ax2, label='RSI', color='purple')
+            # 添加超买超卖线
+            self.ax2.axhline(y=70, color='r', linestyle='--', alpha=0.3)
+            self.ax2.axhline(y=30, color='g', linestyle='--', alpha=0.3)
+            
+        elif 'macd' in recent_data.columns:
+            recent_data['macd'].plot(ax=self.ax2, label='MACD', color='blue')
+            if 'macd_signal' in recent_data.columns:
+                recent_data['macd_signal'].plot(ax=self.ax2, label='Signal', color='red')
+                
+        self.ax2.set_title('技术指标')
+        self.ax2.legend()
+        self.ax2.grid(True, linestyle='--', alpha=0.5)
+        
+        # 预测概率图 - Handle N/A confidence
+        self.ax3.clear() # Clear previous plot first
+        if confidence != "N/A":
+            try:
+                prob_value = float(confidence)
+                bar_color = 'green' if prediction == "上涨" else 'red'
+                self.ax3.bar(['看涨概率'], [prob_value], color=bar_color, alpha=0.7)
+                self.ax3.axhline(y=0.5, color='k', linestyle='--', alpha=0.5)
+                self.ax3.set_ylim(0, 1)
+                self.ax3.set_ylabel('概率')
+                self.ax3.yaxis.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+            except ValueError:
+                 self.ax3.text(0.5, 0.5, '信赖度 N/A', ha='center', va='center', fontsize=12)
+                 self.ax3.set_yticks([]) # Remove y-axis ticks
+                 self.ax3.set_xticks([]) # Remove x-axis ticks
+
+        else:
+            # Display N/A text if confidence is N/A
+            self.ax3.text(0.5, 0.5, '信赖度 N/A', ha='center', va='center', fontsize=12)
+            self.ax3.set_yticks([]) # Remove y-axis ticks
+            self.ax3.set_xticks([]) # Remove x-axis ticks
+
+        self.ax3.set_title('预测信心')
+        
+        # 调整布局
+        self.fig.tight_layout()
+        
+        # 更新图表
+        self.canvas.draw()
+        
+    def _show_feature_importance(self, model):
+        """显示特征重要性"""
+        # 清空文本框
+        self.feature_text.delete("1.0", tk.END)
+        
+        # 获取特征重要性
+        try:
+            feature_importance = model.get_feature_importance()
+        except Exception as e:
+            logger.error(f"获取特征重要性时出错: {e}")
+            self.feature_text.insert(tk.END, f"无法获取特征重要性: {e}")
+            return
+        
+        # 检查返回结果
+        if feature_importance is None or feature_importance.empty:
+            self.feature_text.insert(tk.END, "模型未提供特征重要性数据。")
+            return
+            
+        # 格式化并显示 Top 10 特征
+        # Select top 10 features here
+        top_features = feature_importance.head(10)
+        feature_text_content = "特征重要性 (Top 10):\n" + "-"*20 + "\n"
+        for feature, importance in top_features.items():
+            feature_text_content += f"{feature}: {importance:.4f}\n"
+            
+        self.feature_text.insert(tk.END, feature_text_content)
+        
+    # NEW: Method to load the industry list
+    def _load_industry_list(self):
+        """加载行业列表并更新下拉菜单"""
+        try:
+            # 这里可以添加从数据源获取行业数据的代码
+            # 现在我们使用示例数据
+            industries = ["银行", "证券", "保险", "房地产", "互联网", "医药", "制造业", "能源"]
+            self.industry_combo['values'] = industries
+            self.industry_var.set(industries[0] if industries else "无数据")
+        except Exception as e:
+            print(f"加载行业列表出错: {e}")
+            messagebox.showerror("错误", f"加载行业列表失败: {e}")
+            self.industry_var.set("加载失败")
+    
+    # NEW: Method to load stocks for the selected industry
+    def _load_industry_stocks(self):
+        """基于选定的行业加载股票"""
+        selected_industry = self.industry_var.get()
+        if selected_industry == "加载中..." or selected_industry == "加载失败" or selected_industry == "无数据":
+            messagebox.showinfo("提示", "请先选择一个有效的行业")
+            return
+            
+        try:
+            # 这里可以添加从数据源获取行业成分股的代码
+            # 现在我们使用示例数据
+            industry_stocks = {
+                "银行": ["601398.SH", "600036.SH", "601288.SH", "601328.SH", "601988.SH"],
+                "证券": ["600030.SH", "601688.SH", "601211.SH", "600999.SH", "601066.SH"],
+                "保险": ["601318.SH", "601628.SH", "601336.SH", "601601.SH", "601319.SH"],
+                "房地产": ["600048.SH", "001979.SZ", "600606.SH", "000002.SZ", "600340.SH"],
+                "互联网": ["000725.SZ", "002415.SZ", "600804.SH", "300315.SZ", "002230.SZ"],
+                "医药": ["600276.SH", "000538.SZ", "600196.SH", "000963.SZ", "600085.SH"],
+                "制造业": ["601766.SH", "600104.SH", "000425.SZ", "600660.SH", "601877.SH"],
+                "能源": ["601857.SH", "600028.SH", "601088.SH", "600019.SH", "601898.SH"]
+            }
+            
+            stocks = industry_stocks.get(selected_industry, [])
+            if stocks:
+                self.stock_listbox.delete(0, tk.END)
+                for stock in stocks:
+                    self.stock_listbox.insert(tk.END, stock)
+                messagebox.showinfo("成功", f"已加载{selected_industry}行业的{len(stocks)}只股票")
+            else:
+                messagebox.showinfo("提示", f"未找到{selected_industry}行业的股票数据")
+        except Exception as e:
+            print(f"加载行业成分股出错: {e}")
+            messagebox.showerror("错误", f"加载行业成分股失败: {e}")
+        
+def main():
+    """主函数"""
+    root = tk.Tk()
+    app = MLPredictionGUI(root)
+    root.mainloop()
+    
+if __name__ == "__main__":
+    main() 

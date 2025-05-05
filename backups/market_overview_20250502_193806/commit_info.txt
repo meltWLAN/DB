@@ -1,0 +1,5 @@
+Commit: 87b898c43a5d48f18fdf1dfdc2078413c5602458
+Author: Your Name
+Date: Fri May 2 17:57:35 2025 +0800
+Message: Fix market overview module: repair with_cache decorator and ensure real data usage
+
